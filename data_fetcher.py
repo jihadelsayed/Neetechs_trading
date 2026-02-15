@@ -14,10 +14,17 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
 
+def _flatten_yf_columns(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    # yfinance can return MultiIndex columns like ('Close', 'AAPL')
+    if isinstance(df.columns, pd.MultiIndex):
+        # keep the field name level (Open/High/Low/Close/Adj Close/Volume)
+        # typical shape: level0 = field, level1 = ticker
+        df = df.copy()
+        df.columns = [col[0] for col in df.columns]  # take field names
+    return df
+
+
 def fetch_symbol(symbol: str) -> pd.DataFrame:
-    """
-    Download daily OHLCV data for a symbol and return as a DataFrame.
-    """
     df = yf.download(
         symbol,
         start=START_DATE,
@@ -30,12 +37,15 @@ def fetch_symbol(symbol: str) -> pd.DataFrame:
     if df is None or df.empty:
         raise ValueError(f"No data returned for symbol: {symbol}")
 
-    # Normalize columns and index
+    df = _flatten_yf_columns(df, symbol)
+
+    # Normalize index/columns
     df = df.copy()
     df.index = pd.to_datetime(df.index)
-    df.columns = [c.strip().title() for c in df.columns]  # Open, High, Low, Close, Adj Close, Volume
 
-    # Keep only standard columns if present
+    # Now columns are strings, safe to normalize
+    df.columns = [str(c).strip().title() for c in df.columns]
+
     keep = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
     df = df[keep]
 
@@ -47,7 +57,7 @@ def save_symbol_csv(symbol: str, df: pd.DataFrame) -> Path:
     Save a symbol's DataFrame to data/<SYMBOL>.csv and return path.
     """
     path = DATA_DIR / f"{symbol}.csv"
-    df.to_csv(path, index=True)
+    df.to_csv(path, index_label="Date")  # IMPORTANT
     return path
 
 
