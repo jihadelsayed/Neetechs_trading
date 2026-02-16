@@ -329,6 +329,10 @@ def run_portfolio(
     allow_regime_trade: bool = ALLOW_REGIME_TRADE,
     price_mode: str = PRICE_MODE,
     execution: str = EXECUTION,
+    top_n: int | None = None,
+    mom_lookback: int | None = None,
+    rebalance: str | None = None,
+    long_window: int | None = None,
     max_position_weight: float | None = MAX_POSITION_WEIGHT,
     max_sector_weight: float | None = MAX_SECTOR_WEIGHT,
     sector_map: dict[str, str] | None = None,
@@ -341,15 +345,35 @@ def run_portfolio(
     vol_lookback: int = VOL_LOOKBACK,
     slippage_mode: str = SLIPPAGE_MODE,
 ) -> PortfolioRun:
+    local_top_n = int(top_n) if top_n is not None else TOP_N
+    local_mom = int(mom_lookback) if mom_lookback is not None else MOM_LOOKBACK
+    local_rebalance = rebalance or REBALANCE
+    local_long = int(long_window) if long_window is not None else LONG_WINDOW
+
     panel_close, panel_open = build_price_panels(price_dict, price_mode=price_mode)
     if panel_close.empty:
         raise ValueError("Price panel is empty. No symbols with usable data.")
 
-    regime_ok = market_regime_ok(panel_close, regime_symbol=regime_symbol)
-    mom = momentum_scores(panel_close)
-    trend_ok = trend_filter(panel_close)
+    def momentum_scores_local(panel: pd.DataFrame) -> pd.DataFrame:
+        return panel.pct_change(local_mom)
 
-    rebal_dates = panel_close.resample(REBALANCE).last().index
+    def trend_filter_local(panel: pd.DataFrame) -> pd.DataFrame:
+        sma = panel.rolling(local_long).mean()
+        return panel > sma
+
+    def market_regime_ok_local(panel: pd.DataFrame) -> pd.Series:
+        if regime_symbol in panel.columns:
+            px = panel[regime_symbol]
+        else:
+            px = panel.mean(axis=1)
+        sma200 = px.rolling(local_long).mean()
+        return px > sma200
+
+    regime_ok = market_regime_ok_local(panel_close)
+    mom = momentum_scores_local(panel_close)
+    trend_ok = trend_filter_local(panel_close)
+
+    rebal_dates = panel_close.resample(local_rebalance).last().index
     rebal_dates = set([d for d in rebal_dates if d in panel_close.index])
 
     tradable_symbols = [s for s in panel_close.columns if allow_regime_trade or s != regime_symbol]
@@ -401,7 +425,7 @@ def run_portfolio(
         ok_row = ok_row.loc[tradable_symbols]
 
         score_row = score_row.where(ok_row).dropna()
-        top = score_row.sort_values(ascending=False).head(TOP_N).index.tolist()
+        top = score_row.sort_values(ascending=False).head(local_top_n).index.tolist()
 
         if not top:
             return {sym: 0.0 for sym in tradable_symbols}
