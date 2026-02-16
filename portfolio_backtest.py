@@ -8,7 +8,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tradinglab.strategies.ma_crossover import add_indicators, generate_signals  # noqa: E402
+from tradinglab.engine.portfolio import (  # noqa: E402
+    build_panel,
+    run_portfolio,
+    buy_hold_benchmark,
+)
 
-
-__all__ = ["add_indicators", "generate_signals"]
+__all__ = ["build_panel", "run_portfolio", "buy_hold_benchmark"]
