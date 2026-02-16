@@ -29,7 +29,7 @@ def test_portfolio_deterministic_on_tiny_dataset(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 1)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -50,6 +50,8 @@ def test_portfolio_deterministic_on_tiny_dataset(monkeypatch):
         allow_regime_trade=False,
         execution="same_close",
         price_mode="raw",
+        cash_buffer=0.0,
+        slippage_mode="constant",
     )
     equity = run.equity["Portfolio_Value"].round(6).tolist()
 

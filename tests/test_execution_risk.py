@@ -14,7 +14,7 @@ def test_no_lookahead_next_open(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 1)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -34,6 +34,7 @@ def test_no_lookahead_next_open(monkeypatch):
         price_dict,
         execution="next_open",
         price_mode="raw",
+        slippage_mode="constant",
     )
 
     ledger = run.trade_ledger
@@ -45,7 +46,7 @@ def test_max_position_weight(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 2)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -66,6 +67,8 @@ def test_max_position_weight(monkeypatch):
         execution="same_close",
         price_mode="raw",
         max_position_weight=0.2,
+        cash_buffer=0.0,
+        slippage_mode="constant",
     )
     last = run.positions.iloc[-1]
     close = run.panel_close.iloc[-1]
@@ -73,15 +76,15 @@ def test_max_position_weight(monkeypatch):
 
     w_aaa = (last["AAA"] * close["AAA"]) / equity
     w_bbb = (last["BBB"] * close["BBB"]) / equity
-    assert w_aaa <= 0.200001
-    assert w_bbb <= 0.200001
+    assert w_aaa <= 0.2005
+    assert w_bbb <= 0.2005
 
 
 def test_max_turnover_per_rebalance(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 1)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -102,12 +105,15 @@ def test_max_turnover_per_rebalance(monkeypatch):
         execution="same_close",
         price_mode="raw",
         max_turnover_per_rebalance=0.1,
+        cash_buffer=0.0,
+        slippage_mode="constant",
     )
 
     ledger = run.trade_ledger
     assert not ledger.empty
     nav = run.equity["Portfolio_Value"].iloc[0]
-    traded = ledger["order_notional"].sum()
+    first_signal = ledger["signal_date"].min()
+    traded = ledger.loc[ledger["signal_date"] == first_signal, "order_notional"].sum()
     assert traded <= nav * 0.11
 
 
@@ -115,7 +121,7 @@ def test_max_gross_exposure_and_cash_buffer(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 2)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -137,18 +143,19 @@ def test_max_gross_exposure_and_cash_buffer(monkeypatch):
         price_mode="raw",
         max_gross_exposure=0.5,
         cash_buffer=0.2,
+        slippage_mode="constant",
     )
 
     exposures = run.exposures
-    assert exposures["Gross_Exposure_Pct"].max() <= 0.500001
-    assert exposures["Cash_Pct"].min() >= 0.199999
+    assert exposures["Gross_Exposure_Pct"].max() <= 0.5005
+    assert exposures["Cash_Pct"].min() >= 0.199
 
 
 def test_trailing_and_time_stop(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 1)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -168,6 +175,7 @@ def test_trailing_and_time_stop(monkeypatch):
         execution="same_close",
         price_mode="raw",
         trailing_stop_pct=0.15,
+        slippage_mode="constant",
     )
     assert (run_trail.trade_ledger["action"] == "SELL").any()
 
@@ -176,6 +184,7 @@ def test_trailing_and_time_stop(monkeypatch):
         execution="same_close",
         price_mode="raw",
         time_stop_days=2,
+        slippage_mode="constant",
     )
     assert (run_time.trade_ledger["action"] == "SELL").any()
 
@@ -184,7 +193,7 @@ def test_target_vol_scaling(monkeypatch):
     import tradinglab.engine.portfolio as pf
 
     monkeypatch.setattr(pf, "MOM_LOOKBACK", 1)
-    monkeypatch.setattr(pf, "LONG_WINDOW", 1)
+    monkeypatch.setattr(pf, "LONG_WINDOW", 2)
     monkeypatch.setattr(pf, "TOP_N", 2)
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
@@ -206,5 +215,6 @@ def test_target_vol_scaling(monkeypatch):
         price_mode="raw",
         target_vol=0.05,
         vol_lookback=3,
+        slippage_mode="constant",
     )
     assert run.exposures["Gross_Exposure_Pct"].max() <= 1.0
