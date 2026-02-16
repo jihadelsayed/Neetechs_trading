@@ -26,6 +26,7 @@ def run(argv: list[str] | None = None) -> int:
     from tradinglab.data.tickers import nasdaq100_tickers
     from tradinglab.data.fetcher import load_or_fetch_symbols
     from tradinglab.config import REGIME_SYMBOL
+    from app.state import load_state
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -40,6 +41,13 @@ def run(argv: list[str] | None = None) -> int:
     price_dict = load_or_fetch_symbols(symbols, refresh=False)
     if not price_dict:
         print("Health check failed: no data")
+        return 1
+
+    # state readable
+    try:
+        load_state(Path("logs/state.json"), {})
+    except Exception:
+        print("Health check failed: state unreadable")
         return 1
 
     latest_dates = []

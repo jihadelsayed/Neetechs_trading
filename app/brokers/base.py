@@ -27,6 +27,13 @@ class Fill:
     timestamp: str
 
 
+@dataclass
+class Position:
+    symbol: str
+    qty: float
+    avg_price: float | None = None
+
+
 class MarketDataProvider(Protocol):
     def get_latest_prices(self, symbols: list[str]) -> pd.DataFrame:
         ...
@@ -39,10 +46,13 @@ class Broker(Protocol):
     def get_account(self) -> dict:
         ...
 
-    def place_orders(self, orders: list[Order]) -> list[Fill]:
+    def get_positions(self) -> dict[str, float]:
         ...
 
-    def get_positions(self) -> dict[str, float]:
+    def get_latest_prices(self, symbols: list[str]) -> pd.DataFrame:
+        ...
+
+    def place_orders(self, orders: list[Order]) -> list[Fill]:
         ...
 
     def cancel_all(self) -> None:

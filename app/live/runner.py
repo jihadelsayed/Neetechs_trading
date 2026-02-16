@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import List
 
@@ -19,6 +21,9 @@ from tradinglab.config import (
     PRICE_MODE,
     REBALANCE,
     MAX_TURNOVER_PER_REBALANCE,
+    MAX_ORDER_NOTIONAL,
+    MAX_ORDERS_PER_RUN,
+    MAX_POSITION_WEIGHT,
 )
 from tradinglab.data.tickers import nasdaq100_tickers
 from tradinglab.engine.portfolio import build_price_panels, _weights_from_shares
@@ -109,6 +114,10 @@ def run_live_cycle(
     dry_run: bool,
     state_path: Path,
     flatten: bool,
+    mode: str = "paper",
+    confirm: bool = False,
+    accept_real_trading: str = "",
+    flatten_on_kill: bool = False,
 ) -> list[Order]:
     if universe == "small":
         symbols = ["AAPL", "MSFT", "NVDA", "AMZN", REGIME_SYMBOL]
@@ -148,6 +157,20 @@ def run_live_cycle(
     state = load_state(state_path, config_snapshot)
     write_config_snapshot(Path("logs/state_config.json"), config_snapshot)
 
+    if mode == "live":
+        live_enabled = os.getenv("LIVE_TRADING_ENABLED") == "true"
+        if accept_real_trading != "YES" or not live_enabled:
+            print("Live trading not enabled; refusing to trade.")
+            return []
+        if confirm:
+            from app.brokers.alpaca import AlpacaBroker
+
+            broker = AlpacaBroker()
+        else:
+            broker = PaperBroker(provider, cash=state.cash, positions=state.positions, execution=execution)
+    else:
+        broker = PaperBroker(provider, cash=state.cash, positions=state.positions, execution=execution)
+
     if state.last_processed_date == fill_date.isoformat():
         print("Already processed:", fill_date.date())
         return []
@@ -155,8 +178,6 @@ def run_live_cycle(
     if state.in_progress and state.last_run_date == fill_date.isoformat():
         print("Detected incomplete run; aborting to avoid duplicates.")
         return []
-
-    broker = PaperBroker(provider, cash=state.cash, positions=state.positions, execution=execution)
 
     if not broker.is_market_open():
         return []
@@ -169,6 +190,7 @@ def run_live_cycle(
     current_weights = _weights_from_shares(prices_close, state.positions, equity)
 
     risk_triggers: list[str] = []
+    rejects: list[str] = []
 
     if flatten:
         target_weights = {sym: 0.0 for sym in current_weights}
@@ -179,6 +201,14 @@ def run_live_cycle(
             risk_triggers.append("turnover_cap_applied")
         target_weights = capped
 
+    if MAX_POSITION_WEIGHT is not None:
+        for sym, w in target_weights.items():
+            if w > MAX_POSITION_WEIGHT:
+                msg = f"Target weight exceeds MAX_POSITION_WEIGHT for {sym}"
+                rejects.append(msg)
+                print(msg)
+                return []
+
     prices_open = panel_open.loc[fill_date]
     orders = generate_orders_from_weights(list(current_weights.keys()), state.positions, target_weights, prices_open, equity)
     for o in orders:
@@ -188,6 +218,59 @@ def run_live_cycle(
         for o in orders:
             print(f"DRY-RUN {o.side} {o.qty:.4f} {o.symbol} @ {prices_open[o.symbol]:.2f}")
         return orders
+
+    allowed = set(symbols)
+    for o in orders:
+        if o.symbol not in allowed:
+            msg = f"Order symbol not allowed: {o.symbol}"
+            rejects.append(msg)
+            print(msg)
+            return []
+
+    # pre-flight safety checks
+    if len(orders) > MAX_ORDERS_PER_RUN:
+        msg = "Order count exceeds MAX_ORDERS_PER_RUN"
+        rejects.append(msg)
+        print(msg)
+        return []
+
+    buy_notional = 0.0
+    for o in orders:
+        notional = o.qty * float(prices_open[o.symbol])
+        if notional > MAX_ORDER_NOTIONAL:
+            msg = f"Order too large for {o.symbol}"
+            rejects.append(msg)
+            print(msg)
+            return []
+        if o.side == "BUY":
+            buy_notional += notional
+
+    if buy_notional > state.cash and state.cash > 0:
+        msg = "Buy notional exceeds cash"
+        rejects.append(msg)
+        print(msg)
+        return []
+
+    pending_path = Path("logs") / f"pending_orders_{fill_date.date()}.json"
+    pending_path.write_text(json.dumps([o.__dict__ for o in orders], indent=2))
+
+    if mode == "live" and not confirm:
+        print(f"Pending orders written to {pending_path}. Use --confirm to place.")
+        return orders
+
+    if os.getenv("KILL_SWITCH") == "true":
+        send_alert("KILL_SWITCH active: no orders placed.")
+        if flatten_on_kill and mode == "live":
+            broker.cancel_all()
+            positions = broker.get_positions()
+            flatten_orders = []
+            for sym, qty in positions.items():
+                if qty > 0 and sym in prices_open.index:
+                    flatten_orders.append(Order(symbol=sym, side="SELL", qty=qty))
+            if flatten_orders:
+                pending_path.write_text(json.dumps([o.__dict__ for o in flatten_orders], indent=2))
+                broker.place_orders(flatten_orders)
+        return []
 
     state.in_progress = True
     state.last_run_date = fill_date.isoformat()
@@ -244,6 +327,10 @@ def run_live_cycle(
         risk_triggers=risk_triggers,
         qqq_bh=qqq_bh,
         strategy_since_start=strategy_since_start,
+        broker_summary=broker.get_account() if hasattr(broker, "get_account") else None,
+        order_status="placed",
+        rejects=rejects,
+        pending_path=str(pending_path),
     )
 
     return orders

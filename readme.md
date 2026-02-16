@@ -100,6 +100,22 @@ Install dependencies using:
     -   logs/reports/YYYY-MM-DD_report.md
     -   logs/state.json
 
+## Live Broker (Optional, Disabled by Default)
+
+To enable live broker placement (Alpaca), all of these are required:
+
+-   `--mode live`
+-   `--i-accept-real-trading YES`
+-   env `LIVE_TRADING_ENABLED=true`
+
+Environment variables:
+-   `ALPACA_API_KEY`
+-   `ALPACA_API_SECRET`
+-   `ALPACA_BASE_URL` (optional, default paper endpoint)
+
+Kill switch:
+-   `KILL_SWITCH=true` blocks all orders and logs an alert.
+
 ------------------------------------------------------------------------
 
 ## Defaults

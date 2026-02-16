@@ -93,6 +93,9 @@ class PaperBroker(Broker):
     def get_positions(self) -> dict[str, float]:
         return dict(self.positions)
 
+    def get_latest_prices(self, symbols: list[str]) -> pd.DataFrame:
+        return self.provider.get_latest_prices(symbols)
+
     def get_account(self) -> dict:
         equity = self.cash
         if self.positions:

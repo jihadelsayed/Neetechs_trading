@@ -20,6 +20,10 @@ def write_daily_report(
     risk_triggers: list[str],
     qqq_bh: float,
     strategy_since_start: float,
+    broker_summary: dict | None = None,
+    order_status: str | None = None,
+    rejects: list[str] | None = None,
+    pending_path: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pnl = end_equity - start_equity
@@ -61,6 +65,22 @@ def write_daily_report(
             lines.append(f"- {trigger}")
     else:
         lines.append("- None")
+    lines.append("")
+    lines.append("## Broker Summary")
+    if broker_summary:
+        for k, v in broker_summary.items():
+            lines.append(f"- {k}: {v}")
+    else:
+        lines.append("- None")
+    lines.append("")
+    lines.append("## Order Status")
+    lines.append(f"- {order_status or 'none'}")
+    if rejects:
+        lines.append("- Rejects:")
+        for r in rejects:
+            lines.append(f"- {r}")
+    if pending_path:
+        lines.append(f"- Pending orders: {pending_path}")
     lines.append("")
     lines.append("## Comparison Snapshot")
     lines.append(f"- QQQ buy&hold since start: {qqq_bh:.2f}")

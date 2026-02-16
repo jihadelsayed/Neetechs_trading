@@ -25,7 +25,7 @@ def _parse_bool(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run live (paper) loop")
-    parser.add_argument("--mode", choices=["paper"], default="paper")
+    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
     parser.add_argument("--universe", choices=["small", "nasdaq100"], default="nasdaq100")
     parser.add_argument(
         "--dry-run",
@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-path", default="logs/state.json")
     parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--run-once", action="store_true", default=True)
+    parser.add_argument("--confirm", action="store_true", default=False)
+    parser.add_argument("--i-accept-real-trading", default="")
+    parser.add_argument("--flatten-on-kill", action="store_true", default=False)
     return parser
 
 
@@ -65,6 +68,10 @@ def run(argv: list[str] | None = None) -> None:
         dry_run=bool(args.dry_run),
         state_path=state_path,
         flatten=bool(args.flatten),
+        mode=args.mode,
+        confirm=bool(args.confirm),
+        accept_real_trading=args.i_accept_real_trading,
+        flatten_on_kill=bool(args.flatten_on_kill),
     )
 
 
