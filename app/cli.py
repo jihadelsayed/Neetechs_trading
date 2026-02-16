@@ -47,6 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ME", "W-FRI"],
         help="Rebalance frequency",
     )
+    parser.add_argument(
+        "--execution",
+        choices=["next_open", "same_close"],
+        help="Execution timing",
+    )
+    parser.add_argument(
+        "--price-mode",
+        choices=["adj", "raw"],
+        help="Price mode",
+    )
+    parser.add_argument("--max-position-weight", type=float, help="Max position weight")
+    parser.add_argument("--trailing-stop", type=float, help="Trailing stop pct")
+    parser.add_argument("--time-stop", type=int, help="Max holding days")
+    parser.add_argument("--target-vol", type=float, help="Target annualized vol")
     return parser
 
 
@@ -71,6 +85,12 @@ def run(argv: list[str] | None = None) -> None:
         end_date=args.end_date,
         top_n=args.top_n,
         rebalance=args.rebalance,
+        execution=args.execution,
+        price_mode=args.price_mode,
+        max_position_weight=args.max_position_weight,
+        trailing_stop=args.trailing_stop,
+        time_stop=args.time_stop,
+        target_vol=args.target_vol,
     )
 
 

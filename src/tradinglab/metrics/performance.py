@@ -76,7 +76,10 @@ def calmar(series: pd.Series) -> float:
 def turnover(trade_ledger: pd.DataFrame, equity_series: pd.Series) -> float:
     if trade_ledger is None or trade_ledger.empty:
         return 0.0
-    notional = (trade_ledger["shares"].abs() * trade_ledger["price"].abs()).sum()
+    if "order_notional" in trade_ledger.columns:
+        notional = trade_ledger["order_notional"].abs().sum()
+    else:
+        notional = (trade_ledger["shares"].abs() * trade_ledger["fill_price"].abs()).sum()
     avg_equity = float(equity_series.mean()) if equity_series is not None and not equity_series.empty else 0.0
     if avg_equity == 0:
         return float("nan")
@@ -96,8 +99,9 @@ def trade_win_rate(trade_ledger: pd.DataFrame) -> float:
         symbol = row["symbol"]
         action = row["action"]
         shares = float(row["shares"])
-        price = float(row["price"])
-        fee = float(row["fee"])
+        price = float(row["fill_price"])
+        fee = float(row["fees"])
+        slippage_cost = float(row.get("slippage_cost", 0.0))
 
         if symbol not in lots:
             lots[symbol] = deque()
@@ -105,12 +109,12 @@ def trade_win_rate(trade_ledger: pd.DataFrame) -> float:
         if action == "BUY":
             if shares <= 0:
                 continue
-            cost_per_share = (shares * price + fee) / shares
+            cost_per_share = (shares * price + fee + slippage_cost) / shares
             lots[symbol].append([shares, cost_per_share])
         elif action == "SELL":
             if shares <= 0:
                 continue
-            proceeds_per_share = (shares * price - fee) / shares
+            proceeds_per_share = (shares * price - fee - slippage_cost) / shares
             remaining = shares
             pnl = 0.0
 

@@ -28,7 +28,15 @@ def main(
     end_date: str | None = None,
     top_n: int | None = None,
     rebalance: str | None = None,
+    execution: str | None = None,
+    price_mode: str | None = None,
+    max_position_weight: float | None = None,
+    trailing_stop: float | None = None,
+    time_stop: int | None = None,
+    target_vol: float | None = None,
 ) -> None:
+    import tradinglab.engine.portfolio as portfolio
+
     if symbols is None:
         symbols = nasdaq100_tickers()
 
@@ -38,13 +46,15 @@ def main(
 
     print("Universe size:", len(symbols))
 
-    if top_n is not None or rebalance is not None:
-        import tradinglab.engine.portfolio as portfolio
-
+    if any([top_n is not None, rebalance is not None, execution is not None, price_mode is not None]):
         if top_n is not None:
             portfolio.TOP_N = int(top_n)
         if rebalance is not None:
             portfolio.REBALANCE = rebalance
+        if execution is not None:
+            portfolio.EXECUTION = execution
+        if price_mode is not None:
+            portfolio.PRICE_MODE = price_mode
 
     price_dict = load_or_fetch_symbols(
         symbols,
@@ -65,6 +75,12 @@ def main(
         price_dict,
         regime_symbol=REGIME_SYMBOL,
         allow_regime_trade=ALLOW_REGIME_TRADE,
+        execution=execution or portfolio.EXECUTION,
+        price_mode=price_mode or portfolio.PRICE_MODE,
+        max_position_weight=max_position_weight,
+        trailing_stop_pct=trailing_stop,
+        time_stop_days=time_stop,
+        target_vol=target_vol,
     )
     pf = portfolio_run.equity
     pf.to_csv(RESULTS_DIR / "portfolio.csv", index_label="Date")
@@ -76,11 +92,15 @@ def main(
     positions = portfolio_run.positions
     positions.to_csv(RESULTS_DIR / "positions.csv", index_label="Date")
 
+    exposures = portfolio_run.exposures
+    exposures.to_csv(RESULTS_DIR / "exposures.csv", index_label="Date")
+
     # Buy & hold benchmark of same basket
     bh = buy_hold_benchmark(
         price_dict,
         regime_symbol=REGIME_SYMBOL,
         allow_regime_trade=ALLOW_REGIME_TRADE,
+        price_mode=price_mode or portfolio.PRICE_MODE,
     )
 
     merged = pf.join(bh, how="inner")
@@ -89,7 +109,7 @@ def main(
     # QQQ buy & hold benchmark
     qqq_bh = None
     if REGIME_SYMBOL in price_dict:
-        qqq_bh = buy_hold_single(price_dict, REGIME_SYMBOL)
+        qqq_bh = buy_hold_single(price_dict, REGIME_SYMBOL, price_mode=price_mode or portfolio.PRICE_MODE)
         qqq_bh.to_csv(RESULTS_DIR / f"{REGIME_SYMBOL}_buyhold.csv", index_label="Date")
 
     # Metrics
