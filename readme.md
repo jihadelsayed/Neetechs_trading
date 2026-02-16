@@ -86,6 +86,19 @@ Install dependencies using:
 
     -   python -m app.backtest --universe small
     -   python -m app.experiment --universe small --walk-forward
+    -   python -m app.live --mode paper --universe nasdaq100 --execution next_open
+    -   python -m app.live --mode paper --universe nasdaq100 --flatten
+
+## Daily Paper Run
+
+-   Command: `python -m app.live --mode paper --universe nasdaq100 --execution next_open`
+-   Schedule: call once per day from Task Scheduler/cron
+-   Outputs:
+    -   logs/paper_trades.csv
+    -   logs/paper_positions.csv
+    -   logs/paper_equity.csv
+    -   logs/reports/YYYY-MM-DD_report.md
+    -   logs/state.json
 
 ------------------------------------------------------------------------
 

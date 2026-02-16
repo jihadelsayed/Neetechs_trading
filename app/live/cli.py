@@ -45,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-mode", choices=["adj", "raw"], default="adj")
     parser.add_argument("--state-path", default="logs/state.json")
     parser.add_argument("--flatten", action="store_true")
+    parser.add_argument("--run-once", action="store_true", default=True)
     return parser
 
 

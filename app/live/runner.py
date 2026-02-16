@@ -8,6 +8,9 @@ import pandas as pd
 from app.brokers.base import Order
 from app.brokers.paper import CachedMarketDataProvider, PaperBroker
 from app.state import load_state, save_state, LiveState
+from app.alerts import send_alert
+from app.reporting import write_daily_report
+from app.config_validate import validate_config, write_config_snapshot
 from tradinglab.config import (
     START_DATE,
     END_DATE,
@@ -19,6 +22,7 @@ from tradinglab.config import (
 )
 from tradinglab.data.tickers import nasdaq100_tickers
 from tradinglab.engine.portfolio import build_price_panels, _weights_from_shares
+from tradinglab.engine.portfolio import buy_hold_single
 
 
 def _compute_targets(
@@ -113,6 +117,10 @@ def run_live_cycle(
         if REGIME_SYMBOL not in symbols:
             symbols.append(REGIME_SYMBOL)
 
+    errors = validate_config(execution, price_mode, REBALANCE)
+    if errors:
+        raise ValueError("; ".join(errors))
+
     provider = CachedMarketDataProvider(price_mode=price_mode)
     history = provider.get_history(symbols, start=START_DATE, end=END_DATE)
 
@@ -138,6 +146,15 @@ def run_live_cycle(
         "rebalance": REBALANCE,
     }
     state = load_state(state_path, config_snapshot)
+    write_config_snapshot(Path("logs/state_config.json"), config_snapshot)
+
+    if state.last_processed_date == fill_date.isoformat():
+        print("Already processed:", fill_date.date())
+        return []
+
+    if state.in_progress and state.last_run_date == fill_date.isoformat():
+        print("Detected incomplete run; aborting to avoid duplicates.")
+        return []
 
     broker = PaperBroker(provider, cash=state.cash, positions=state.positions, execution=execution)
 
@@ -146,13 +163,21 @@ def run_live_cycle(
 
     prices_close = panel_close.loc[signal_date]
     equity = broker.get_account()["equity"]
+    if state.strategy_start_equity is None:
+        state.strategy_start_equity = equity
+    start_equity = equity
     current_weights = _weights_from_shares(prices_close, state.positions, equity)
+
+    risk_triggers: list[str] = []
 
     if flatten:
         target_weights = {sym: 0.0 for sym in current_weights}
     else:
         target_weights = _compute_targets(panel_close, signal_date, current_weights, history, price_mode)
-        target_weights = _apply_turnover_cap(current_weights, target_weights, MAX_TURNOVER_PER_REBALANCE)
+        capped = _apply_turnover_cap(current_weights, target_weights, MAX_TURNOVER_PER_REBALANCE)
+        if capped != target_weights:
+            risk_triggers.append("turnover_cap_applied")
+        target_weights = capped
 
     prices_open = panel_open.loc[fill_date]
     orders = generate_orders_from_weights(list(current_weights.keys()), state.positions, target_weights, prices_open, equity)
@@ -164,6 +189,10 @@ def run_live_cycle(
             print(f"DRY-RUN {o.side} {o.qty:.4f} {o.symbol} @ {prices_open[o.symbol]:.2f}")
         return orders
 
+    state.in_progress = True
+    state.last_run_date = fill_date.isoformat()
+    save_state(state_path, state)
+
     broker.place_orders(orders)
 
     acct = broker.get_account()
@@ -171,6 +200,8 @@ def run_live_cycle(
     state.positions = acct["positions"]
     state.last_processed_date = fill_date.isoformat()
     state.last_rebalance_date = signal_date.isoformat()
+    state.last_equity = acct["equity"]
+    state.in_progress = False
 
     for sym, qty in state.positions.items():
         if qty > 0:
@@ -181,4 +212,38 @@ def run_live_cycle(
             state.holdings_info.pop(sym, None)
 
     save_state(state_path, state)
+
+    # reporting
+    prices_for_report = panel_open.loc[fill_date]
+    cash_pct = state.cash / acct["equity"] if acct["equity"] > 0 else 0.0
+    gross_exposure = sum(
+        abs(qty * float(prices_for_report[sym])) for sym, qty in state.positions.items() if sym in prices_for_report.index
+    )
+    gross_exposure_pct = gross_exposure / acct["equity"] if acct["equity"] > 0 else 0.0
+    turnover = sum(abs(o.qty * float(prices_for_report[o.symbol])) for o in orders) / acct["equity"] if acct["equity"] > 0 else 0.0
+
+    qqq_bh = 0.0
+    if REGIME_SYMBOL in history:
+        qqq = buy_hold_single(history, REGIME_SYMBOL, price_mode=price_mode)
+        if fill_date in qqq.index:
+            qqq_bh = float(qqq.loc[fill_date].iloc[0])
+
+    strategy_since_start = acct["equity"] - (state.strategy_start_equity or acct["equity"])
+
+    report_path = Path("logs/reports") / f"{fill_date.date()}_report.md"
+    write_daily_report(
+        report_path,
+        date=str(fill_date.date()),
+        start_equity=start_equity,
+        end_equity=acct["equity"],
+        positions=state.positions,
+        prices=prices_for_report,
+        cash_pct=cash_pct,
+        gross_exposure=gross_exposure_pct,
+        turnover=turnover,
+        risk_triggers=risk_triggers,
+        qqq_bh=qqq_bh,
+        strategy_since_start=strategy_since_start,
+    )
+
     return orders

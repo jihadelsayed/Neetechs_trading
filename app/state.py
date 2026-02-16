@@ -15,6 +15,10 @@ class LiveState:
     last_processed_date: str | None
     holdings_info: dict[str, dict]
     config_snapshot: dict
+    in_progress: bool
+    last_run_date: str | None
+    last_equity: float | None
+    strategy_start_equity: float | None
 
     @staticmethod
     def default(config_snapshot: dict) -> "LiveState":
@@ -25,6 +29,10 @@ class LiveState:
             last_processed_date=None,
             holdings_info={},
             config_snapshot=config_snapshot,
+            in_progress=False,
+            last_run_date=None,
+            last_equity=None,
+            strategy_start_equity=None,
         )
 
 
@@ -39,6 +47,10 @@ def load_state(path: Path, config_snapshot: dict) -> LiveState:
         last_processed_date=raw.get("last_processed_date"),
         holdings_info=raw.get("holdings_info", {}),
         config_snapshot=raw.get("config_snapshot", config_snapshot),
+        in_progress=raw.get("in_progress", False),
+        last_run_date=raw.get("last_run_date"),
+        last_equity=raw.get("last_equity"),
+        strategy_start_equity=raw.get("strategy_start_equity"),
     )
 
 

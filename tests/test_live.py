@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.live.runner import generate_orders_from_weights
+from app.live.runner import generate_orders_from_weights, run_live_cycle
 from app.state import LiveState, save_state, load_state
 from app.brokers.paper import CachedMarketDataProvider, PaperBroker
 from app.brokers.base import Order
+from app.reporting import write_daily_report
 
 
 def test_generate_orders_from_weights():
@@ -50,7 +51,7 @@ def test_paper_broker_fill():
     assert broker.get_positions()["AAA"] > 0
 
 
-def test_live_dry_run_deterministic(tmp_path):
+def test_live_idempotency(tmp_path, monkeypatch):
     dates = pd.date_range("2024-01-01", periods=3, freq="D")
     df = pd.DataFrame(
         {
@@ -62,11 +63,50 @@ def test_live_dry_run_deterministic(tmp_path):
         },
         index=dates,
     )
-    provider = CachedMarketDataProvider(price_dict={"AAA": df, "QQQ": df}, price_mode="raw")
-    provider.set_current_date(dates[-1])
-    broker = PaperBroker(provider, cash=100.0, positions={})
 
-    # deterministic orders from same weights
+    monkeypatch.setattr("tradinglab.data.fetcher.load_or_fetch_symbols", lambda *args, **kwargs: {"AAA": df, "QQQ": df})
+
+    state_path = tmp_path / "state.json"
+    state = LiveState.default({})
+    state.last_processed_date = dates[-1].isoformat()
+    save_state(state_path, state)
+
+    orders = run_live_cycle(
+        universe="small",
+        refresh_data=False,
+        execution="next_open",
+        price_mode="raw",
+        dry_run=False,
+        state_path=state_path,
+        flatten=False,
+    )
+    assert orders == []
+
+
+def test_health_report_sections(tmp_path):
+    path = tmp_path / "report.md"
+    write_daily_report(
+        path,
+        date="2024-01-02",
+        start_equity=100.0,
+        end_equity=105.0,
+        positions={"AAA": 1.0},
+        prices=pd.Series({"AAA": 100.0}),
+        cash_pct=0.5,
+        gross_exposure=0.5,
+        turnover=0.1,
+        risk_triggers=["turnover_cap_applied"],
+        qqq_bh=120.0,
+        strategy_since_start=5.0,
+    )
+    text = path.read_text()
+    assert "## Equity" in text
+    assert "## Exposure" in text
+    assert "## Positions" in text
+    assert "## Risk Triggers" in text
+
+
+def test_live_dry_run_deterministic(tmp_path):
     orders1 = [Order(symbol="AAA", side="BUY", qty=1.0)]
     orders2 = [Order(symbol="AAA", side="BUY", qty=1.0)]
     assert orders1[0].qty == orders2[0].qty
