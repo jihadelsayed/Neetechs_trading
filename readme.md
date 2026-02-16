@@ -77,6 +77,7 @@ Install dependencies using:
 ## How to Run
 
 1.  Install dependencies: pip install -r requirements.txt
+    Editable install: `pip install -e .`
 
 2.  Download data: python data_fetcher.py
 
@@ -88,6 +89,64 @@ Install dependencies using:
     -   python -m app.experiment --universe small --walk-forward
     -   python -m app.live --mode paper --universe nasdaq100 --execution next_open
     -   python -m app.live --mode paper --universe nasdaq100 --flatten
+
+## Quickstart (Local)
+
+```bash
+pip install -e .
+neetechs-health --universe small
+neetechs-backtest --universe small --start 2024-01-01 --end 2025-01-01
+```
+
+## Docker
+
+Build:
+
+```bash
+docker build -t neetechs-trading .
+```
+
+Run backtest:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.backtest --universe small
+```
+
+Run experiment:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.experiment --universe small --walk-forward
+```
+
+Run paper live loop:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.live --mode paper --universe small --execution next_open
+```
+
+## CI
+
+GitHub Actions runs ruff + pytest on push/PR (Python 3.10/3.11/3.12).
+
+## Nightly Experiments
+
+Workflow: `.github/workflows/nightly.yml`
+Enable by setting repository variable `NIGHTLY_ENABLED=true`.
+
+## Outputs
+
+- `data/` cached market data
+- `results/` backtests, experiments, robustness
+- `logs/` live paper logs, reports, state
+
+## Dashboard
+
+Install optional deps:
+
+```bash
+pip install -e .[dashboard]
+streamlit run app/dashboard.py
+```
 
 ## Daily Paper Run
 
