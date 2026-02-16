@@ -33,6 +33,9 @@ def run_experiment(
     train_days: int,
     test_days: int,
     step_days: int,
+    grid_search: bool = False,
+    max_combos: int | None = None,
+    jobs: int = 1,
     execution: str | None = None,
     price_mode: str | None = None,
     max_position_weight: float | None = None,
@@ -109,9 +112,88 @@ def run_experiment(
     equity_rows: list[dict] = []
     ledger_rows: list[dict] = []
 
+    grid_train_rows: list[dict] = []
+    grid_test_rows: list[dict] = []
+    grid_selected_rows: list[dict] = []
+
+    def _grid_params() -> list[dict]:
+        grid = []
+        for top_n in [5, 10, 15, 20]:
+            for mom in [126, 189, 252]:
+                for reb in ["W-FRI", "ME"]:
+                    for lw in [150, 200, 250]:
+                        grid.append(
+                            {
+                                "top_n": top_n,
+                                "mom_lookback": mom,
+                                "rebalance": reb,
+                                "long_window": lw,
+                            }
+                        )
+        return grid
+
+    def _score_run(run) -> float:
+        from tradinglab.metrics.performance import sharpe
+
+        return sharpe(run.equity["Portfolio_Value"])
+
+    params_grid = _grid_params() if grid_search else []
+    if max_combos is not None and params_grid:
+        params_grid = params_grid[: max_combos]
+
     for split_id, split in enumerate(splits, start=1):
         train_slice = _slice_price_dict(price_dict, split["train_start"], split["train_end"])
         test_slice = _slice_price_dict(price_dict, split["test_start"], split["test_end"])
+
+        if grid_search and train_slice:
+            def _run_param(param: dict) -> dict:
+                run_train = run_portfolio(
+                    train_slice,
+                    execution=execution or EXECUTION,
+                    price_mode=price_mode or PRICE_MODE,
+                    slippage_mode="constant",
+                    top_n=param["top_n"],
+                    mom_lookback=param["mom_lookback"],
+                    rebalance=param["rebalance"],
+                    long_window=param["long_window"],
+                )
+                return {"param": param, "train_sharpe": _score_run(run_train)}
+
+            if jobs > 1:
+                from joblib import Parallel, delayed
+
+                results = Parallel(n_jobs=max(1, jobs))(delayed(_run_param)(p) for p in params_grid)
+            else:
+                results = [_run_param(p) for p in params_grid]
+
+            for res in results:
+                row = {"split_id": split_id, **res["param"], "train_sharpe": res["train_sharpe"]}
+                grid_train_rows.append(row)
+
+            top = sorted(results, key=lambda x: x["train_sharpe"], reverse=True)[:3]
+            for selected in top:
+                grid_selected_rows.append(
+                    {"split_id": split_id, **selected["param"], "train_sharpe": selected["train_sharpe"]}
+                )
+
+                if test_slice:
+                    run_test = run_portfolio(
+                        test_slice,
+                        execution=execution or EXECUTION,
+                        price_mode=price_mode or PRICE_MODE,
+                        slippage_mode="constant",
+                        top_n=selected["param"]["top_n"],
+                        mom_lookback=selected["param"]["mom_lookback"],
+                        rebalance=selected["param"]["rebalance"],
+                        long_window=selected["param"]["long_window"],
+                    )
+                    grid_test_rows.append(
+                        {
+                            "split_id": split_id,
+                            **selected["param"],
+                            "test_sharpe": _score_run(run_test),
+                        }
+                    )
 
         for label, dataset in [("train", train_slice), ("test", test_slice)]:
             if not dataset:
@@ -185,5 +267,10 @@ def run_experiment(
         ledger_df.to_csv(out_dir / "trade_ledger.csv", index=False)
     else:
         pd.DataFrame().to_csv(out_dir / "trade_ledger.csv", index=False)
+
+    if grid_search:
+        pd.DataFrame(grid_train_rows).to_csv(out_dir / "grid_results_train.csv", index=False)
+        pd.DataFrame(grid_selected_rows).to_csv(out_dir / "grid_selected.csv", index=False)
+        pd.DataFrame(grid_test_rows).to_csv(out_dir / "grid_results_test.csv", index=False)
 
     return out_dir

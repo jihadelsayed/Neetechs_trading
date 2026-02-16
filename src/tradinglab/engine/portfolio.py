@@ -354,6 +354,15 @@ def run_portfolio(
     if panel_close.empty:
         raise ValueError("Price panel is empty. No symbols with usable data.")
 
+    tradable_symbols = [s for s in panel_close.columns if allow_regime_trade or s != regime_symbol]
+    panel_close = panel_close[tradable_symbols]
+    panel_open = panel_open[tradable_symbols]
+
+    close_values = panel_close.to_numpy()
+    open_values = panel_open.to_numpy()
+    dates = list(panel_close.index)
+    n_days, n_syms = close_values.shape
+
     def momentum_scores_local(panel: pd.DataFrame) -> pd.DataFrame:
         return panel.pct_change(local_mom)
 
@@ -369,251 +378,234 @@ def run_portfolio(
         sma200 = px.rolling(local_long).mean()
         return px > sma200
 
-    regime_ok = market_regime_ok_local(panel_close)
-    mom = momentum_scores_local(panel_close)
-    trend_ok = trend_filter_local(panel_close)
+    regime_ok = market_regime_ok_local(panel_close).to_numpy()
+    mom = momentum_scores_local(panel_close).to_numpy()
+    trend_ok = trend_filter_local(panel_close).to_numpy()
 
     rebal_dates = panel_close.resample(local_rebalance).last().index
-    rebal_dates = set([d for d in rebal_dates if d in panel_close.index])
-
-    tradable_symbols = [s for s in panel_close.columns if allow_regime_trade or s != regime_symbol]
+    rebal_mask = np.array([d in set(rebal_dates) for d in dates])
 
     cash = float(INITIAL_CAPITAL)
-    shares = {s: 0.0 for s in tradable_symbols}
-    holding_info: dict[str, dict] = {}
+    shares = np.zeros(n_syms, dtype=float)
+    holding_info: dict[int, dict] = {}
 
     ledger_rows: list[dict] = []
     positions_rows: list[dict] = []
     exposure_rows: list[dict] = []
     value_rows: list[dict] = []
 
-    pending_orders: dict[pd.Timestamp, list[dict]] = {}
+    pending_orders: dict[int, list[tuple[int, float, pd.Timestamp]]] = {}
+    eq_ret = pd.Series(close_values.mean(axis=1), index=dates).pct_change()
 
-    eq_ret = panel_close[tradable_symbols].pct_change().mean(axis=1)
+    def portfolio_value(prices: np.ndarray) -> float:
+        return float(cash + np.dot(shares, prices))
 
-    def queue_orders(signal_date: pd.Timestamp, fill_date: pd.Timestamp, order_shares: dict[str, float]) -> None:
+    def queue_orders(signal_idx: int, fill_idx: int, order_shares: np.ndarray) -> None:
         orders = []
-        for sym, sh in order_shares.items():
+        for i in range(n_syms):
+            sh = float(order_shares[i])
             if abs(sh) <= 0:
                 continue
-            orders.append(
-                {
-                    "signal_date": signal_date,
-                    "fill_date": fill_date,
-                    "symbol": sym,
-                    "shares": sh,
-                }
-            )
-        if not orders:
-            return
-        pending_orders.setdefault(fill_date, []).extend(orders)
+            orders.append((i, sh, dates[signal_idx]))
+        if orders:
+            pending_orders.setdefault(fill_idx, []).extend(orders)
 
-    def compute_targets(signal_date: pd.Timestamp, prices_close: pd.Series, idx: int) -> dict[str, float]:
-        current_equity = _portfolio_value(prices_close, cash, shares)
-        current_weights = _weights_from_shares(prices_close, shares, current_equity)
+    def compute_targets(idx: int) -> np.ndarray:
+        current_equity = portfolio_value(close_values[idx])
+        current_weights = np.zeros(n_syms) if current_equity <= 0 else (shares * close_values[idx]) / current_equity
 
-        if not bool(regime_ok.loc[signal_date]):
-            return {sym: 0.0 for sym in tradable_symbols}
+        if not bool(regime_ok[idx]):
+            return np.zeros(n_syms)
 
-        if signal_date not in rebal_dates:
+        if not rebal_mask[idx]:
             return current_weights
 
-        score_row = mom.loc[signal_date].copy()
-        ok_row = trend_ok.loc[signal_date].copy()
+        scores = mom[idx].copy()
+        ok_mask = trend_ok[idx]
+        scores = np.where(ok_mask, scores, -np.inf)
+        if np.all(np.isneginf(scores)):
+            return np.zeros(n_syms)
 
-        score_row = score_row.loc[tradable_symbols]
-        ok_row = ok_row.loc[tradable_symbols]
-
-        score_row = score_row.where(ok_row).dropna()
-        top = score_row.sort_values(ascending=False).head(local_top_n).index.tolist()
-
-        if not top:
-            return {sym: 0.0 for sym in tradable_symbols}
-
-        base_weight = 1.0 / len(top)
-        targets = {sym: (base_weight if sym in top else 0.0) for sym in tradable_symbols}
+        top_idx = np.argsort(scores)[-local_top_n:]
+        top_idx = [i for i in top_idx if np.isfinite(scores[i])]
+        if not top_idx:
+            return np.zeros(n_syms)
+        targets = np.zeros(n_syms)
+        base_weight = 1.0 / len(top_idx)
+        for i in top_idx:
+            targets[i] = base_weight
 
         vol_scale = _vol_scale(eq_ret.iloc[: idx + 1], target_vol, vol_lookback)
         if vol_scale < 1.0:
-            for sym in targets:
-                targets[sym] *= vol_scale
+            targets *= vol_scale
 
-        if sector_map is not None and max_sector_weight is not None:
-            targets = _apply_sector_cap(targets, sector_map, max_sector_weight)
+        if max_position_weight is not None:
+            targets = np.minimum(targets, max_position_weight)
 
-        targets = _apply_weight_caps(targets, max_position_weight, max_gross_exposure, cash_buffer)
+        total = targets.sum()
+        if max_gross_exposure is not None and total > max_gross_exposure and total > 0:
+            targets *= max_gross_exposure / total
+            total = targets.sum()
+        if cash_buffer is not None:
+            cap = max(0.0, 1.0 - cash_buffer)
+            if total > cap and total > 0:
+                targets *= cap / total
 
-        current_weights = _weights_from_shares(prices_close, shares, current_equity)
-        targets = _apply_turnover_cap(current_weights, targets, max_turnover_per_rebalance)
+        turnover = float(np.abs(targets - current_weights).sum())
+        if max_turnover_per_rebalance is not None and turnover > max_turnover_per_rebalance and turnover > 0:
+            scale = max_turnover_per_rebalance / turnover
+            targets = current_weights + (targets - current_weights) * scale
         return targets
 
-    def apply_exit_overrides(targets: dict[str, float], prices_close: pd.Series, idx: int) -> dict[str, float]:
+    def apply_exit_overrides(idx: int, targets: np.ndarray) -> np.ndarray:
         adjusted = targets.copy()
-        for sym in tradable_symbols:
-            if shares[sym] <= 0:
+        for i in range(n_syms):
+            if shares[i] <= 0:
                 continue
-            info = holding_info.get(sym)
+            info = holding_info.get(i)
             if info is None:
                 continue
             peak = info["peak"]
             entry_idx = info["entry_idx"]
             holding_days = idx - entry_idx + 1
-
             exit_due = False
             if trailing_stop_pct is not None:
-                if prices_close[sym] <= peak * (1.0 - trailing_stop_pct):
+                if close_values[idx][i] <= peak * (1.0 - trailing_stop_pct):
                     exit_due = True
             if time_stop_days is not None and holding_days >= time_stop_days:
                 exit_due = True
             if exit_due:
-                adjusted[sym] = 0.0
+                adjusted[i] = 0.0
         return adjusted
 
-    def order_shares_from_targets(prices_close: pd.Series, targets: dict[str, float]) -> dict[str, float]:
-        equity = _portfolio_value(prices_close, cash, shares)
+    def order_shares_from_targets(idx: int, targets: np.ndarray) -> np.ndarray:
+        equity = portfolio_value(close_values[idx])
         if equity <= 0:
-            return {sym: 0.0 for sym in tradable_symbols}
-        order_shares: dict[str, float] = {}
-        for sym in tradable_symbols:
-            target_shares = (equity * targets.get(sym, 0.0)) / float(prices_close[sym])
-            order_shares[sym] = target_shares - shares[sym]
-        return order_shares
+            return np.zeros(n_syms)
+        target_shares = (equity * targets) / close_values[idx]
+        return target_shares - shares
 
-    def scale_buys_for_cash(prices_close: pd.Series, order_shares: dict[str, float]) -> dict[str, float]:
-        equity = _portfolio_value(prices_close, cash, shares)
+    def scale_buys_for_cash(idx: int, order_shares: np.ndarray) -> np.ndarray:
+        equity = portfolio_value(close_values[idx])
         cash_buffer_amount = max(0.0, (cash_buffer or 0.0) * equity)
         available_cash = max(0.0, cash - cash_buffer_amount)
-
-        buy_notional = 0.0
-        for sym, sh in order_shares.items():
-            if sh > 0:
-                buy_notional += sh * float(prices_close[sym])
+        buy_notional = float(np.sum(np.where(order_shares > 0, order_shares * close_values[idx], 0.0)))
         if buy_notional <= 0:
             return order_shares
         if buy_notional <= available_cash:
             return order_shares
         scale = available_cash / buy_notional
         adjusted = order_shares.copy()
-        for sym, sh in order_shares.items():
-            if sh > 0:
-                adjusted[sym] = sh * scale
+        adjusted = np.where(adjusted > 0, adjusted * scale, adjusted)
         return adjusted
 
-    dates = list(panel_close.index)
+    def execute_order(idx: int, sym_idx: int, sh: float, signal_date: pd.Timestamp, fill_date: pd.Timestamp, prices: np.ndarray) -> None:
+        nonlocal cash, shares
+        if sh == 0.0:
+            return
+        action = "BUY" if sh > 0 else "SELL"
+        price_mid = float(prices[sym_idx])
+        nav = float(cash + np.dot(shares, prices))
+        trade_notional = abs(sh) * price_mid
+        slip_rate = _slippage_rate(trade_notional, nav, slippage_mode)
+        if action == "SELL" and abs(sh) > shares[sym_idx]:
+            sh = -shares[sym_idx]
+            trade_notional = abs(sh) * price_mid
+            slip_rate = _slippage_rate(trade_notional, nav, slippage_mode)
 
-    if execution == "same_close":
-        for idx, date in enumerate(dates):
-            prices_close = panel_close.loc[date]
+        if action == "BUY":
+            cash_buffer_amount = max(0.0, (cash_buffer or 0.0) * nav)
+            available_cash = max(0.0, cash - cash_buffer_amount)
+            fee = trade_notional * FEE_RATE
+            slippage_cost = trade_notional * slip_rate
+            total_cost = trade_notional + fee + slippage_cost
+            if total_cost > available_cash and total_cost > 0:
+                scale = available_cash / total_cost
+                sh *= scale
+                trade_notional = abs(sh) * price_mid
+                slip_rate = _slippage_rate(trade_notional, nav, slippage_mode)
+                fee = trade_notional * FEE_RATE
+                slippage_cost = trade_notional * slip_rate
+                total_cost = trade_notional + fee + slippage_cost
+            if sh <= 0 or total_cost <= 0:
+                return
+            fill_price = price_mid * (1.0 + slip_rate)
+            cash -= total_cost
+            shares[sym_idx] += sh
+        else:
+            fee = trade_notional * FEE_RATE
+            slippage_cost = trade_notional * slip_rate
+            proceeds = trade_notional - fee - slippage_cost
+            fill_price = price_mid * (1.0 - slip_rate)
+            shares[sym_idx] += sh
+            cash += proceeds
 
-            targets = compute_targets(date, prices_close, idx)
-            targets = apply_exit_overrides(targets, prices_close, idx)
-            order_shares = order_shares_from_targets(prices_close, targets)
-            order_shares = scale_buys_for_cash(prices_close, order_shares)
+        equity_after = cash + np.dot(shares, prices)
+        ledger_rows.append(
+            {
+                "signal_date": signal_date,
+                "fill_date": fill_date,
+                "symbol": tradable_symbols[sym_idx],
+                "action": action,
+                "shares": abs(sh),
+                "fill_price": fill_price,
+                "order_notional": trade_notional,
+                "fees": fee,
+                "slippage_cost": slippage_cost,
+                "cash_after": cash,
+                "equity_after": equity_after,
+            }
+        )
 
-            nav = _portfolio_value(prices_close, cash, shares)
-            for sym, sh in order_shares.items():
-                if sh == 0:
-                    continue
-                order = {
-                    "signal_date": date,
-                    "fill_date": date,
-                    "symbol": sym,
-                    "shares": sh,
-                }
-                cash, shares, ledger_row = _execute_order(
-                    order,
-                    prices_close,
-                    cash,
-                    shares,
-                    nav,
-                    cash_buffer or 0.0,
-                    slippage_mode,
-                )
-                if ledger_row is not None:
-                    ledger_rows.append(ledger_row)
+    for idx in range(n_days):
+        if execution == "next_open" and idx in pending_orders:
+            for sym_idx, sh, signal_date in pending_orders[idx]:
+                execute_order(idx, sym_idx, sh, signal_date, dates[idx], open_values[idx])
+            pending_orders.pop(idx, None)
 
-            # update holding info
-            for sym in tradable_symbols:
-                if shares[sym] > 0:
-                    info = holding_info.get(sym)
-                    if info is None:
-                        holding_info[sym] = {"entry_idx": idx, "peak": float(prices_close[sym])}
-                    else:
-                        info["peak"] = max(info["peak"], float(prices_close[sym]))
+        if execution == "same_close":
+            targets = compute_targets(idx)
+            targets = apply_exit_overrides(idx, targets)
+            order_shares = order_shares_from_targets(idx, targets)
+            order_shares = scale_buys_for_cash(idx, order_shares)
+            for sym_idx in range(n_syms):
+                sh = float(order_shares[sym_idx])
+                if sh != 0:
+                    execute_order(idx, sym_idx, sh, dates[idx], dates[idx], close_values[idx])
+        else:
+            if idx < n_days - 1:
+                targets = compute_targets(idx)
+                targets = apply_exit_overrides(idx, targets)
+                order_shares = order_shares_from_targets(idx, targets)
+                order_shares = scale_buys_for_cash(idx, order_shares)
+                queue_orders(idx, idx + 1, order_shares)
+
+        for sym_idx in range(n_syms):
+            if shares[sym_idx] > 0:
+                info = holding_info.get(sym_idx)
+                if info is None:
+                    holding_info[sym_idx] = {"entry_idx": idx, "peak": float(close_values[idx][sym_idx])}
                 else:
-                    holding_info.pop(sym, None)
+                    info["peak"] = max(info["peak"], float(close_values[idx][sym_idx]))
+            else:
+                holding_info.pop(sym_idx, None)
 
-            equity_close = _portfolio_value(prices_close, cash, shares)
-            gross_exposure = sum(abs(shares[sym] * float(prices_close[sym])) for sym in tradable_symbols)
-            holdings = sum(1 for sym in tradable_symbols if shares[sym] > 0)
+        equity_close = float(cash + np.dot(shares, close_values[idx]))
+        gross_exposure = float(np.sum(np.abs(shares * close_values[idx])))
+        holdings = int(np.sum(shares > 0))
 
-            value_rows.append({"Date": date, "Portfolio_Value": equity_close})
-            positions_rows.append({"Date": date, "Cash": cash, **shares})
-            exposure_rows.append(
-                {
-                    "Date": date,
-                    "Cash_Pct": cash / equity_close if equity_close > 0 else 0.0,
-                    "Gross_Exposure_Pct": gross_exposure / equity_close if equity_close > 0 else 0.0,
-                    "Holdings": holdings,
-                }
-            )
-
-    else:
-        for idx, date in enumerate(dates):
-            prices_open = panel_open.loc[date]
-            prices_close = panel_close.loc[date]
-
-            if date in pending_orders:
-                nav_open = _portfolio_value(prices_open, cash, shares)
-                for order in pending_orders[date]:
-                    cash, shares, ledger_row = _execute_order(
-                        order,
-                        prices_open,
-                        cash,
-                        shares,
-                        nav_open,
-                        cash_buffer or 0.0,
-                        slippage_mode,
-                    )
-                    if ledger_row is not None:
-                        ledger_rows.append(ledger_row)
-                pending_orders.pop(date, None)
-
-            for sym in tradable_symbols:
-                if shares[sym] > 0:
-                    info = holding_info.get(sym)
-                    if info is None:
-                        holding_info[sym] = {"entry_idx": idx, "peak": float(prices_close[sym])}
-                    else:
-                        info["peak"] = max(info["peak"], float(prices_close[sym]))
-                else:
-                    holding_info.pop(sym, None)
-
-            equity_close = _portfolio_value(prices_close, cash, shares)
-            gross_exposure = sum(abs(shares[sym] * float(prices_close[sym])) for sym in tradable_symbols)
-            holdings = sum(1 for sym in tradable_symbols if shares[sym] > 0)
-
-            value_rows.append({"Date": date, "Portfolio_Value": equity_close})
-            positions_rows.append({"Date": date, "Cash": cash, **shares})
-            exposure_rows.append(
-                {
-                    "Date": date,
-                    "Cash_Pct": cash / equity_close if equity_close > 0 else 0.0,
-                    "Gross_Exposure_Pct": gross_exposure / equity_close if equity_close > 0 else 0.0,
-                    "Holdings": holdings,
-                }
-            )
-
-            if idx == len(dates) - 1:
-                continue
-
-            targets = compute_targets(date, prices_close, idx)
-            targets = apply_exit_overrides(targets, prices_close, idx)
-            order_shares = order_shares_from_targets(prices_close, targets)
-            order_shares = scale_buys_for_cash(prices_close, order_shares)
-
-            next_date = dates[idx + 1]
-            queue_orders(date, next_date, order_shares)
+        value_rows.append({"Date": dates[idx], "Portfolio_Value": equity_close})
+        positions_rows.append(
+            {"Date": dates[idx], "Cash": cash, **{tradable_symbols[i]: shares[i] for i in range(n_syms)}}
+        )
+        exposure_rows.append(
+            {
+                "Date": dates[idx],
+                "Cash_Pct": cash / equity_close if equity_close > 0 else 0.0,
+                "Gross_Exposure_Pct": gross_exposure / equity_close if equity_close > 0 else 0.0,
+                "Holdings": holdings,
+            }
+        )
 
     equity_df = pd.DataFrame(value_rows).set_index("Date")
     equity_df["Return_%"] = equity_df["Portfolio_Value"].pct_change() * 100.0

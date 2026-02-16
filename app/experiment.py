@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-days", type=int, default=504)
     parser.add_argument("--test-days", type=int, default=126)
     parser.add_argument("--step-days", type=int, default=63)
+    parser.add_argument("--grid-search", action="store_true", default=False)
+    parser.add_argument("--max-combos", type=int, default=None)
+    parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument(
         "--execution",
         choices=["next_open", "same_close"],
@@ -94,6 +97,9 @@ def run(argv: list[str] | None = None) -> None:
         train_days=args.train_days,
         test_days=args.test_days,
         step_days=args.step_days,
+        grid_search=bool(args.grid_search),
+        max_combos=args.max_combos,
+        jobs=args.jobs,
         execution=args.execution,
         price_mode=args.price_mode,
         max_position_weight=args.max_position_weight,
