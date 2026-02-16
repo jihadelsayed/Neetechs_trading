@@ -31,14 +31,22 @@ Install dependencies using:
 -   pandas
 -   numpy
 -   yfinance
+-   requests
+-   beautifulsoup4
+-   lxml
+-   pytest
 
 ------------------------------------------------------------------------
 
 ## requirements.txt Content
 
     pandas>=2.0
-    numpy>=1.24
     yfinance>=0.2.40
+    numpy>=1.24
+    pytest>=8.0
+    requests>=2.31
+    beautifulsoup4>=4.11.1
+    lxml>=5.0
 
 ------------------------------------------------------------------------
 
@@ -74,10 +82,22 @@ Install dependencies using:
 
 3.  Run backtest: python main.py
 
+    Optional entrypoints:
+
+    -   python -m app.backtest --universe small
+    -   python -m app.experiment --universe small --walk-forward
+
 ------------------------------------------------------------------------
+
+## Defaults
+
+-   PRICE_MODE: adj (uses adjusted prices derived from Adj Close; Open is scaled by Adj Close / Close)
+-   EXECUTION: next_open (signals on close[t], fills at open[t+1])
+-   SLIPPAGE_MODE: bps (base 5 bps, per-turnover 0)
+-   CASH_BUFFER: 1%
+-   QQQ remains a regime filter only unless enabled
 
 ## Notes
 
 -   This project is for educational purposes.
--   No transaction costs or slippage included.
 -   Results are not financial advice.
