@@ -8,7 +8,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tradinglab.strategies.ma_crossover import add_indicators, generate_signals  # noqa: E402
+from tradinglab.data.tickers import nasdaq100_tickers  # noqa: E402
 
 
-__all__ = ["add_indicators", "generate_signals"]
+if __name__ == "__main__":
+    syms = nasdaq100_tickers()
+    print("count:", len(syms))
+    print(syms[:25])
