@@ -257,7 +257,6 @@ def _execute_order(
     slippage_mode: str,
 ) -> tuple[float, dict[str, float], dict | None]:
     symbol = order["symbol"]
-    action = order["action"]
     signal_date = order["signal_date"]
     fill_date = order["fill_date"]
     order_shares = float(order["shares"])
