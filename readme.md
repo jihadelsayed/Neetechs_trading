@@ -87,11 +87,16 @@ Install dependencies using:
 
     -   python -m app.backtest --universe small
     -   python -m app.experiment --universe small --walk-forward
+    -   python -m app.signal --universe nasdaq100 --top-n 10 --execution next_open --price-mode adj
     -   python -m app.live --mode paper --universe nasdaq100 --execution next_open
     -   python -m app.live --mode paper --universe nasdaq100 --flatten
     -   rg -n "walk" .
     -   python -m app.experiment --universe nasdaq100 --walk-forward --train-days 504 --test-days 126 --step-days 126
     -   metrics_summary.csv
+
+    -   python -m app.signal --universe nasdaq100 --refresh-data --top-n 10 --execution next_open
+    -   results/live_signal.csv
+
 ## Quickstart (Local)
 
 ```bash
@@ -140,6 +145,7 @@ Enable by setting repository variable `NIGHTLY_ENABLED=true`.
 - `data/` cached market data
 - `results/` backtests, experiments, robustness
 - `logs/` live paper logs, reports, state
+ - `results/live_signal.csv` latest signal snapshot
 
 ## Dashboard
 

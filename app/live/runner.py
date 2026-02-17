@@ -15,7 +15,6 @@ from app.reporting import write_daily_report
 from app.config_validate import validate_config, write_config_snapshot
 from tradinglab.config import (
     START_DATE,
-    END_DATE,
     REGIME_SYMBOL,
     EXECUTION,
     PRICE_MODE,
@@ -36,6 +35,7 @@ def _compute_targets(
     current_weights: dict[str, float],
     price_dict: dict[str, pd.DataFrame],
     price_mode: str,
+    top_n: int | None = None,
 ) -> dict[str, float]:
     from tradinglab.engine.portfolio import run_portfolio
 
@@ -48,6 +48,7 @@ def _compute_targets(
         execution="same_close",
         price_mode=price_mode,
         slippage_mode="constant",
+        top_n=top_n,
     )
     if run.positions.empty:
         return {sym: 0.0 for sym in current_weights}
@@ -106,6 +107,20 @@ def _apply_turnover_cap(
     return adjusted
 
 
+def compute_target_weights(
+    panel_close: pd.DataFrame,
+    signal_date: pd.Timestamp,
+    current_weights: dict[str, float],
+    price_dict: dict[str, pd.DataFrame],
+    price_mode: str,
+    max_turnover: float | None = MAX_TURNOVER_PER_REBALANCE,
+    top_n: int | None = None,
+) -> tuple[dict[str, float], bool]:
+    target_weights = _compute_targets(panel_close, signal_date, current_weights, price_dict, price_mode, top_n=top_n)
+    capped = _apply_turnover_cap(current_weights, target_weights, max_turnover)
+    return capped, capped != target_weights
+
+
 def run_live_cycle(
     universe: str,
     refresh_data: bool,
@@ -119,6 +134,7 @@ def run_live_cycle(
     accept_real_trading: str = "",
     flatten_on_kill: bool = False,
 ) -> list[Order]:
+    end_date = pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
     if universe == "small":
         symbols = ["AAPL", "MSFT", "NVDA", "AMZN", REGIME_SYMBOL]
     else:
@@ -131,7 +147,7 @@ def run_live_cycle(
         raise ValueError("; ".join(errors))
 
     provider = CachedMarketDataProvider(price_mode=price_mode)
-    history = provider.get_history(symbols, start=START_DATE, end=END_DATE)
+    history = provider.get_history(symbols, start=START_DATE, end=end_date)
 
     panel_close, panel_open = build_price_panels(history, price_mode=price_mode)
     if panel_close.empty:
@@ -195,11 +211,16 @@ def run_live_cycle(
     if flatten:
         target_weights = {sym: 0.0 for sym in current_weights}
     else:
-        target_weights = _compute_targets(panel_close, signal_date, current_weights, history, price_mode)
-        capped = _apply_turnover_cap(current_weights, target_weights, MAX_TURNOVER_PER_REBALANCE)
-        if capped != target_weights:
+        target_weights, turnover_capped = compute_target_weights(
+            panel_close,
+            signal_date,
+            current_weights,
+            history,
+            price_mode,
+            max_turnover=MAX_TURNOVER_PER_REBALANCE,
+        )
+        if turnover_capped:
             risk_triggers.append("turnover_cap_applied")
-        target_weights = capped
 
     if MAX_POSITION_WEIGHT is not None:
         for sym, w in target_weights.items():

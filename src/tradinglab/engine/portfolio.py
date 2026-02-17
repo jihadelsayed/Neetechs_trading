@@ -498,9 +498,37 @@ def run_portfolio(
         exclude = set()
         if not allow_regime_trade and regime_symbol in tradable_symbols:
             exclude.add(regime_symbol)
+
+        finite_mask = score_row.replace([np.inf, -np.inf], np.nan).notna()
+        sigma_mask = sigma_row.replace([np.inf, -np.inf], np.nan).notna() & (sigma_row > 0)
+        eligible_mask = finite_mask & sigma_mask & (~score_row.index.isin(exclude))
+        eligible_scores = score_row[eligible_mask]
+        if eligible_scores.empty:
+            if regime_symbol in tradable_symbols:
+                targets = np.zeros(n_syms)
+                targets[tradable_symbols.index(regime_symbol)] = 1.0
+                if log_fn is not None:
+                    log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; holding {regime_symbol}.")
+                return targets
+            if log_fn is not None:
+                log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; staying in cash.")
+            return np.zeros(n_syms)
+
         current_syms = [tradable_symbols[i] for i in range(n_syms) if shares[i] > 0]
-        selected = select_with_turnover_buffer(score_row, current_syms, local_top_n, buffer=TURNOVER_BUFFER, exclude_symbols=exclude)
+        selected = select_with_turnover_buffer(
+            eligible_scores,
+            current_syms,
+            local_top_n,
+            buffer=TURNOVER_BUFFER,
+            exclude_symbols=set(),
+        )
         if not selected:
+            if regime_symbol in tradable_symbols:
+                targets = np.zeros(n_syms)
+                targets[tradable_symbols.index(regime_symbol)] = 1.0
+                if log_fn is not None:
+                    log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; holding {regime_symbol}.")
+                return targets
             if log_fn is not None:
                 log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; staying in cash.")
             return np.zeros(n_syms)

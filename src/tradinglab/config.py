@@ -4,7 +4,7 @@ from pathlib import Path
 
 # Date range for historical data
 START_DATE = "2023-01-01"
-END_DATE = "2026-01-01"
+END_DATE = None
 
 # Initial capital for backtesting
 INITIAL_CAPITAL = 1000.0

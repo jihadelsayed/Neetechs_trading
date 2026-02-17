@@ -50,15 +50,16 @@ def fetch_symbol(
     end_date: str | None = None,
 ) -> pd.DataFrame:
     start = start_date or START_DATE
-    end = end_date or END_DATE
-    df = yf.download(
-        symbol,
-        start=start,
-        end=end,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-    )
+    end = end_date if end_date is not None else END_DATE
+    kwargs = {
+        "start": start,
+        "interval": "1d",
+        "auto_adjust": False,
+        "progress": False,
+    }
+    if end is not None:
+        kwargs["end"] = end
+    df = yf.download(symbol, **kwargs)
 
     if df is None or df.empty:
         raise ValueError(f"No data returned for symbol: {symbol}")
@@ -78,17 +79,18 @@ def fetch_symbols(
         return {}
 
     start = start_date or START_DATE
-    end = end_date or END_DATE
+    end = end_date if end_date is not None else END_DATE
     joined = " ".join(symbols)
-    df = yf.download(
-        joined,
-        start=start,
-        end=end,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        group_by="ticker",
-    )
+    kwargs = {
+        "start": start,
+        "interval": "1d",
+        "auto_adjust": False,
+        "progress": False,
+        "group_by": "ticker",
+    }
+    if end is not None:
+        kwargs["end"] = end
+    df = yf.download(joined, **kwargs)
 
     out: dict[str, pd.DataFrame] = {}
     for sym in symbols:
