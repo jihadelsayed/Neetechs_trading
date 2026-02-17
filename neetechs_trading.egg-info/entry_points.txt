@@ -1,0 +1,6 @@
+[console_scripts]
+neetechs-backtest = app.backtest:run
+neetechs-experiment = app.experiment:run
+neetechs-health = app.health:run
+neetechs-live = app.live.cli:run
+neetechs-robustness = app.robustness:run
