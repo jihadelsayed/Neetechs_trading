@@ -19,6 +19,9 @@ MIN_VOL20 = 0.8
 # Realism
 FEE_RATE = 0.001        # 0.10% per trade
 SLIPPAGE_RATE = 0.0005  # 0.05% worse fill on buys/sells
+SLIPPAGE_MODE = "bps"   # "bps" or "constant"
+SLIPPAGE_BPS_BASE = 5.0
+SLIPPAGE_BPS_PER_TURNOVER = 0.0
 REBALANCE = "ME"        # month-end rebalance
 MOM_LOOKBACK = 126
 TOP_N = 15
@@ -26,6 +29,25 @@ TOP_N = 15
 # Regime filter
 REGIME_SYMBOL = "QQQ"
 ALLOW_REGIME_TRADE = False
+
+# Execution + pricing
+EXECUTION = "next_open"  # "next_open" or "same_close"
+PRICE_MODE = "adj"       # "adj" or "raw"
+
+# Risk controls (portfolio-level)
+MAX_POSITION_WEIGHT = None
+MAX_SECTOR_WEIGHT = None
+MAX_TURNOVER_PER_REBALANCE = None
+MAX_GROSS_EXPOSURE = 1.0
+CASH_BUFFER = 0.01
+MAX_ORDER_NOTIONAL = 10000.0
+MAX_ORDERS_PER_RUN = 50
+
+# Risk controls (position-level)
+TRAILING_STOP_PCT = None
+TIME_STOP_DAYS = None
+TARGET_VOL = None
+VOL_LOOKBACK = 20
 
 # Paths
 DATA_DIR = Path("data")

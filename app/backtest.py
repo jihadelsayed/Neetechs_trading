@@ -24,7 +24,7 @@ def _parse_bool(value: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run backtest")
+    parser = argparse.ArgumentParser(description="Run portfolio backtest")
     parser.add_argument(
         "--refresh-data",
         nargs="?",

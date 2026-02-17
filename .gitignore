@@ -9,6 +9,8 @@ venv/
 
 # Test
 .pytest_cache/
+.ruff_cache/
+*.egg-info/
 
 # Local data/output
 /data/

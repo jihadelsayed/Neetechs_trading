@@ -34,6 +34,7 @@ def test_portfolio_deterministic_on_tiny_dataset(monkeypatch):
     monkeypatch.setattr(pf, "REBALANCE", "D")
     monkeypatch.setattr(pf, "FEE_RATE", 0.0)
     monkeypatch.setattr(pf, "SLIPPAGE_RATE", 0.0)
+    monkeypatch.setattr(pf, "SLIPPAGE_MODE", "constant")
     monkeypatch.setattr(pf, "REGIME_SYMBOL", "QQQ")
     monkeypatch.setattr(pf, "ALLOW_REGIME_TRADE", False)
 
@@ -43,13 +44,21 @@ def test_portfolio_deterministic_on_tiny_dataset(monkeypatch):
         "BBB": _make_price_df([10, 10, 10, 10, 10], dates),
     }
 
-    run = run_portfolio(price_dict, regime_symbol="QQQ", allow_regime_trade=False)
+    run = run_portfolio(
+        price_dict,
+        regime_symbol="QQQ",
+        allow_regime_trade=False,
+        execution="same_close",
+        price_mode="raw",
+        cash_buffer=0.0,
+        slippage_mode="constant",
+    )
     equity = run.equity["Portfolio_Value"].round(6).tolist()
 
     shares = 1000.0 / 11.0
     expected = [
-        1000.0,  # day1 cash (regime not yet valid)
-        1000.0,  # buy at close day2, equity still 1000
+        1000.0,
+        1000.0,
         shares * 12.0,
         shares * 13.0,
         shares * 14.0,
@@ -84,13 +93,13 @@ def test_buy_hold_benchmark_matches_manual():
 def test_turnover_sanity():
     ledger = pd.DataFrame(
         [
-            {"shares": 10, "price": 10.0},
-            {"shares": 5, "price": 12.0},
+            {"order_notional": 100.0},
+            {"order_notional": 60.0},
         ]
     )
     equity = pd.Series([1000.0, 1100.0, 1050.0])
     t = turnover(ledger, equity)
-    expected_notional = abs(10 * 10.0) + abs(5 * 12.0)
+    expected_notional = 160.0
     expected = expected_notional / equity.mean()
     assert np.isclose(t, expected)
 
@@ -106,5 +115,6 @@ def test_smoke_main_cached_data(tmp_path, monkeypatch):
     assert (tmp_path / "portfolio_vs_bh.csv").exists()
     assert (tmp_path / "trade_ledger.csv").exists()
     assert (tmp_path / "positions.csv").exists()
+    assert (tmp_path / "exposures.csv").exists()
     assert (tmp_path / "metrics.csv").exists()
     assert (tmp_path / "metrics.json").exists()

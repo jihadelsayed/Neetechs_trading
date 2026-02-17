@@ -24,7 +24,7 @@ def _parse_bool(value: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run backtest")
+    parser = argparse.ArgumentParser(description="Run backtest experiments")
     parser.add_argument(
         "--refresh-data",
         nargs="?",
@@ -41,12 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--start", dest="start_date", help="Start date YYYY-MM-DD")
     parser.add_argument("--end", dest="end_date", help="End date YYYY-MM-DD")
-    parser.add_argument("--top-n", dest="top_n", type=int, help="Top N holdings")
+    parser.add_argument("--split-date", dest="split_date", help="Split date YYYY-MM-DD")
     parser.add_argument(
-        "--rebalance",
-        choices=["ME", "W-FRI"],
-        help="Rebalance frequency",
+        "--walk-forward",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_parse_bool,
+        help="Enable walk-forward splits",
     )
+    parser.add_argument("--train-days", type=int, default=504)
+    parser.add_argument("--test-days", type=int, default=126)
+    parser.add_argument("--step-days", type=int, default=63)
+    parser.add_argument("--grid-search", action="store_true", default=False)
+    parser.add_argument("--max-combos", type=int, default=None)
+    parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument(
         "--execution",
         choices=["next_open", "same_close"],
@@ -61,13 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trailing-stop", type=float, help="Trailing stop pct")
     parser.add_argument("--time-stop", type=int, help="Max holding days")
     parser.add_argument("--target-vol", type=float, help="Target annualized vol")
+    parser.add_argument("--seed", type=int, help="Random seed")
     return parser
 
 
 def run(argv: list[str] | None = None) -> None:
     _ensure_src_on_path()
 
-    from tradinglab.cli.main import main
+    from tradinglab.experiments.runner import run_experiment
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -77,14 +87,19 @@ def run(argv: list[str] | None = None) -> None:
     else:
         symbols = None
 
-    main(
-        refresh_data=bool(args.refresh_data),
-        run_per_symbol=False,
+    run_experiment(
         symbols=symbols,
+        refresh_data=bool(args.refresh_data),
         start_date=args.start_date,
         end_date=args.end_date,
-        top_n=args.top_n,
-        rebalance=args.rebalance,
+        split_date=args.split_date,
+        walk_forward=bool(args.walk_forward),
+        train_days=args.train_days,
+        test_days=args.test_days,
+        step_days=args.step_days,
+        grid_search=bool(args.grid_search),
+        max_combos=args.max_combos,
+        jobs=args.jobs,
         execution=args.execution,
         price_mode=args.price_mode,
         max_position_weight=args.max_position_weight,

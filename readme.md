@@ -31,14 +31,22 @@ Install dependencies using:
 -   pandas
 -   numpy
 -   yfinance
+-   requests
+-   beautifulsoup4
+-   lxml
+-   pytest
 
 ------------------------------------------------------------------------
 
 ## requirements.txt Content
 
     pandas>=2.0
-    numpy>=1.24
     yfinance>=0.2.40
+    numpy>=1.24
+    pytest>=8.0
+    requests>=2.31
+    beautifulsoup4>=4.11.1
+    lxml>=5.0
 
 ------------------------------------------------------------------------
 
@@ -69,15 +77,115 @@ Install dependencies using:
 ## How to Run
 
 1.  Install dependencies: pip install -r requirements.txt
+    Editable install: `pip install -e .`
 
 2.  Download data: python data_fetcher.py
 
 3.  Run backtest: python main.py
 
+    Optional entrypoints:
+
+    -   python -m app.backtest --universe small
+    -   python -m app.experiment --universe small --walk-forward
+    -   python -m app.live --mode paper --universe nasdaq100 --execution next_open
+    -   python -m app.live --mode paper --universe nasdaq100 --flatten
+
+## Quickstart (Local)
+
+```bash
+pip install -e .
+neetechs-health --universe small
+neetechs-backtest --universe small --start 2024-01-01 --end 2025-01-01
+```
+
+## Docker
+
+Build:
+
+```bash
+docker build -t neetechs-trading .
+```
+
+Run backtest:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.backtest --universe small
+```
+
+Run experiment:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.experiment --universe small --walk-forward
+```
+
+Run paper live loop:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/results:/app/results -v ${PWD}/logs:/app/logs neetechs-trading python -m app.live --mode paper --universe small --execution next_open
+```
+
+## CI
+
+GitHub Actions runs ruff + pytest on push/PR (Python 3.10/3.11/3.12).
+
+## Nightly Experiments
+
+Workflow: `.github/workflows/nightly.yml`
+Enable by setting repository variable `NIGHTLY_ENABLED=true`.
+
+## Outputs
+
+- `data/` cached market data
+- `results/` backtests, experiments, robustness
+- `logs/` live paper logs, reports, state
+
+## Dashboard
+
+Install optional deps:
+
+```bash
+pip install -e .[dashboard]
+streamlit run app/dashboard.py
+```
+
+## Daily Paper Run
+
+-   Command: `python -m app.live --mode paper --universe nasdaq100 --execution next_open`
+-   Schedule: call once per day from Task Scheduler/cron
+-   Outputs:
+    -   logs/paper_trades.csv
+    -   logs/paper_positions.csv
+    -   logs/paper_equity.csv
+    -   logs/reports/YYYY-MM-DD_report.md
+    -   logs/state.json
+
+## Live Broker (Optional, Disabled by Default)
+
+To enable live broker placement (Alpaca), all of these are required:
+
+-   `--mode live`
+-   `--i-accept-real-trading YES`
+-   env `LIVE_TRADING_ENABLED=true`
+
+Environment variables:
+-   `ALPACA_API_KEY`
+-   `ALPACA_API_SECRET`
+-   `ALPACA_BASE_URL` (optional, default paper endpoint)
+
+Kill switch:
+-   `KILL_SWITCH=true` blocks all orders and logs an alert.
+
 ------------------------------------------------------------------------
+
+## Defaults
+
+-   PRICE_MODE: adj (uses adjusted prices derived from Adj Close; Open is scaled by Adj Close / Close)
+-   EXECUTION: next_open (signals on close[t], fills at open[t+1])
+-   SLIPPAGE_MODE: bps (base 5 bps, per-turnover 0)
+-   CASH_BUFFER: 1%
+-   QQQ remains a regime filter only unless enabled
 
 ## Notes
 
 -   This project is for educational purposes.
--   No transaction costs or slippage included.
 -   Results are not financial advice.
