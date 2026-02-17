@@ -6,9 +6,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from tradinglab.config import RESULTS_DIR, REGIME_SYMBOL, PRICE_MODE, EXECUTION
+from tradinglab.config import (
+    RESULTS_DIR,
+    REGIME_SYMBOL,
+    PRICE_MODE,
+    EXECUTION,
+    LONG_WINDOW,
+    MOM_LOOKBACK,
+    INITIAL_CAPITAL,
+)
 from tradinglab.data.fetcher import load_or_fetch_symbols
 from tradinglab.data.tickers import nasdaq100_tickers
+from tradinglab.data.panel import prepare_panel_with_history_filter
 from tradinglab.engine.portfolio import run_portfolio, buy_hold_benchmark, buy_hold_single
 from tradinglab.metrics.performance import compute_metrics
 from tradinglab.experiments.splits import split_by_date, walk_forward_splits
@@ -24,6 +33,7 @@ def _slice_price_dict(price_dict: dict[str, pd.DataFrame], start: pd.Timestamp, 
 
 
 def run_experiment(
+    universe: str,
     symbols: list[str] | None,
     refresh_data: bool,
     start_date: str | None,
@@ -59,12 +69,31 @@ def run_experiment(
     if not price_dict:
         raise RuntimeError("No market data loaded.")
 
+    warmup_days = max(int(LONG_WINDOW), 252, 126) + 21 + 5
+    min_history_days = warmup_days + int(train_days) + int(test_days) if walk_forward else warmup_days + 1
+    price_mode_effective = price_mode or PRICE_MODE
+
+    price_dict, panel_close, dropped = prepare_panel_with_history_filter(
+        price_dict,
+        price_mode=price_mode_effective,
+        min_history_days=min_history_days,
+        keep_symbols={REGIME_SYMBOL},
+        log_fn=print,
+    )
+    if panel_close.empty:
+        raise ValueError("Price panel is empty after filtering for history.")
+
+    symbols = list(price_dict.keys())
+    print(f"Universe requested: {universe}, loaded symbols: {len(symbols)}")
+
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     out_dir = RESULTS_DIR / "experiments" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config_used = {
+        "universe": universe,
         "symbols": symbols,
+        "dropped_symbols": dropped,
         "refresh_data": refresh_data,
         "start_date": start_date,
         "end_date": end_date,
@@ -73,32 +102,29 @@ def run_experiment(
         "train_days": train_days,
         "test_days": test_days,
         "step_days": step_days,
-        "execution": execution,
-        "price_mode": price_mode,
+        "execution": execution or EXECUTION,
+        "price_mode": price_mode_effective,
         "max_position_weight": max_position_weight,
         "trailing_stop": trailing_stop,
         "time_stop": time_stop,
         "target_vol": target_vol,
+        "warmup_days": warmup_days,
+        "min_history_days": min_history_days,
     }
     (out_dir / "config_used.json").write_text(json.dumps(config_used, indent=2))
 
-    panel = None
-    for df in price_dict.values():
-        panel = df
-        break
-
     if walk_forward:
-        # use close panels from one symbol for date index
-        sample = next(iter(price_dict.values()))
-        date_index = sample.index
-        panel_idx = pd.DataFrame(index=date_index)
+        panel_idx = pd.DataFrame(index=panel_close.index)
         splits = walk_forward_splits(panel_idx, train_days, test_days, step_days)
+        if not splits:
+            print("0 splits produced; check history thresholds/warmup.")
     else:
         if split_date is None:
             raise ValueError("split_date is required for fixed split")
-        sample = next(iter(price_dict.values()))
-        panel_idx = pd.DataFrame(index=sample.index)
+        panel_idx = pd.DataFrame(index=panel_close.index)
         train_idx, test_idx = split_by_date(panel_idx, split_date)
+        if train_idx.empty or test_idx.empty:
+            raise ValueError("Split date results in empty train/test. Adjust split_date or date range.")
         splits = [
             {
                 "train_start": train_idx.index[0],
@@ -141,6 +167,33 @@ def run_experiment(
     if max_combos is not None and params_grid:
         params_grid = params_grid[: max_combos]
 
+    metric_columns = [
+        "Label",
+        "CAGR",
+        "Annual_Vol",
+        "Sharpe",
+        "Sortino",
+        "Max_DD",
+        "Calmar",
+        "Turnover",
+        "Win_Rate",
+        "split_id",
+        "dataset",
+    ]
+    ledger_columns = [
+        "signal_date",
+        "fill_date",
+        "symbol",
+        "action",
+        "shares",
+        "fill_price",
+        "order_notional",
+        "fees",
+        "slippage_cost",
+        "cash_after",
+        "equity_after",
+    ]
+
     for split_id, split in enumerate(splits, start=1):
         train_slice = _slice_price_dict(price_dict, split["train_start"], split["train_end"])
         test_slice = _slice_price_dict(price_dict, split["test_start"], split["test_end"])
@@ -150,7 +203,7 @@ def run_experiment(
                 run_train = run_portfolio(
                     train_slice,
                     execution=execution or EXECUTION,
-                    price_mode=price_mode or PRICE_MODE,
+                    price_mode=price_mode_effective,
                     slippage_mode="constant",
                     top_n=param["top_n"],
                     mom_lookback=param["mom_lookback"],
@@ -180,7 +233,7 @@ def run_experiment(
                     run_test = run_portfolio(
                         test_slice,
                         execution=execution or EXECUTION,
-                        price_mode=price_mode or PRICE_MODE,
+                        price_mode=price_mode_effective,
                         slippage_mode="constant",
                         top_n=selected["param"]["top_n"],
                         mom_lookback=selected["param"]["mom_lookback"],
@@ -197,31 +250,50 @@ def run_experiment(
 
         for label, dataset in [("train", train_slice), ("test", test_slice)]:
             if not dataset:
+                print(f"Split {split_id} had 0 symbols after filtering for {label}; skipping run.")
+                for base_label in [f"Portfolio_{label}", f"BuyHold_{label}", f"{REGIME_SYMBOL}_{label}"]:
+                    metrics = compute_metrics(base_label, pd.Series(dtype=float))
+                    metrics["split_id"] = split_id
+                    metrics["dataset"] = label
+                    per_split_rows.append(metrics)
+                if label == "test":
+                    equity_rows.append(
+                        {
+                            "split_id": split_id,
+                            "date": split["test_start"],
+                            "portfolio_value": float(INITIAL_CAPITAL),
+                            "buyhold_value": float(INITIAL_CAPITAL),
+                            "qqq_value": None,
+                        }
+                    )
                 continue
 
             run = run_portfolio(
                 dataset,
                 execution=execution or EXECUTION,
-                price_mode=price_mode or PRICE_MODE,
+                price_mode=price_mode_effective,
                 max_position_weight=max_position_weight,
                 trailing_stop_pct=trailing_stop,
                 time_stop_days=time_stop,
                 target_vol=target_vol,
+                log_fn=print,
             )
+            if run.trade_ledger.empty:
+                print(f"No trades for split {split_id} ({label}); portfolio stayed in cash.")
 
             pf_metrics = compute_metrics(f"Portfolio_{label}", run.equity["Portfolio_Value"], run.trade_ledger)
             pf_metrics["split_id"] = split_id
             pf_metrics["dataset"] = label
             per_split_rows.append(pf_metrics)
 
-            bh = buy_hold_benchmark(dataset, price_mode=price_mode or PRICE_MODE)
+            bh = buy_hold_benchmark(dataset, price_mode=price_mode_effective)
             bh_metrics = compute_metrics(f"BuyHold_{label}", bh["BuyHold_Value"])
             bh_metrics["split_id"] = split_id
             bh_metrics["dataset"] = label
             per_split_rows.append(bh_metrics)
 
             if REGIME_SYMBOL in dataset:
-                qqq = buy_hold_single(dataset, REGIME_SYMBOL, price_mode=price_mode or PRICE_MODE)
+                qqq = buy_hold_single(dataset, REGIME_SYMBOL, price_mode=price_mode_effective)
                 qqq_metrics = compute_metrics(f"{REGIME_SYMBOL}_{label}", qqq.iloc[:, 0])
                 qqq_metrics["split_id"] = split_id
                 qqq_metrics["dataset"] = label
@@ -249,28 +321,50 @@ def run_experiment(
                     ledger_rows.append(ledger)
 
     per_split_df = pd.DataFrame(per_split_rows)
+    if per_split_df.empty:
+        per_split_df = pd.DataFrame(columns=metric_columns)
+    else:
+        for col in metric_columns:
+            if col not in per_split_df.columns:
+                dtype = object if col in {"Label", "dataset"} else float
+                per_split_df[col] = pd.Series(dtype=dtype)
     per_split_df.to_csv(out_dir / "per_split_metrics.csv", index=False)
 
     if not per_split_df.empty:
-        summary = per_split_df.select_dtypes(include=["number"]).groupby(
-            [per_split_df["Label"], per_split_df["dataset"]]
-        ).mean()
+        numeric_cols = per_split_df.select_dtypes(include=["number"]).columns
+        summary = per_split_df.groupby(["Label", "dataset"])[numeric_cols].agg(["mean", "median"])
+        summary.columns = [f"{col[0]}_{col[1]}" for col in summary.columns]
         summary.reset_index().to_csv(out_dir / "metrics_summary.csv", index=False)
     else:
-        pd.DataFrame().to_csv(out_dir / "metrics_summary.csv", index=False)
+        pd.DataFrame(columns=["Label", "dataset"]).to_csv(out_dir / "metrics_summary.csv", index=False)
 
     equity_df = pd.DataFrame(equity_rows)
+    if equity_df.empty and not panel_close.empty:
+        equity_df = pd.DataFrame(
+            [
+                {
+                    "split_id": 0,
+                    "date": panel_close.index[0],
+                    "portfolio_value": float(INITIAL_CAPITAL),
+                    "buyhold_value": float(INITIAL_CAPITAL),
+                    "qqq_value": None,
+                }
+            ]
+        )
     equity_df.to_csv(out_dir / "equity_curves.csv", index=False)
 
     if ledger_rows:
         ledger_df = pd.concat(ledger_rows, ignore_index=True)
         ledger_df.to_csv(out_dir / "trade_ledger.csv", index=False)
     else:
-        pd.DataFrame().to_csv(out_dir / "trade_ledger.csv", index=False)
+        pd.DataFrame(columns=ledger_columns).to_csv(out_dir / "trade_ledger.csv", index=False)
 
     if grid_search:
         pd.DataFrame(grid_train_rows).to_csv(out_dir / "grid_results_train.csv", index=False)
         pd.DataFrame(grid_selected_rows).to_csv(out_dir / "grid_selected.csv", index=False)
         pd.DataFrame(grid_test_rows).to_csv(out_dir / "grid_results_test.csv", index=False)
+
+    if walk_forward and not splits:
+        raise ValueError("Not enough history for train_days/test_days. Try smaller windows or earlier start date.")
 
     return out_dir

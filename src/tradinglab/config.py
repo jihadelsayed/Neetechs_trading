@@ -46,7 +46,7 @@ MAX_ORDERS_PER_RUN = 50
 # Risk controls (position-level)
 TRAILING_STOP_PCT = None
 TIME_STOP_DAYS = None
-TARGET_VOL = None
+TARGET_VOL = 0.15
 VOL_LOOKBACK = 20
 
 # Paths

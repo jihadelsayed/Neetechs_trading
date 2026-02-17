@@ -7,9 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tradinglab.config import RESULTS_DIR, REGIME_SYMBOL, PRICE_MODE, EXECUTION
+from tradinglab.config import RESULTS_DIR, REGIME_SYMBOL, PRICE_MODE, EXECUTION, LONG_WINDOW, MOM_LOOKBACK
 from tradinglab.data.fetcher import load_or_fetch_symbols
 from tradinglab.data.tickers import nasdaq100_tickers
+from tradinglab.data.panel import prepare_panel_with_history_filter
 from tradinglab.engine.portfolio import run_portfolio, buy_hold_single
 from tradinglab.metrics.performance import sharpe
 from tradinglab.experiments.splits import walk_forward_splits
@@ -60,6 +61,7 @@ def _apply_params(run_kwargs: dict, params: dict) -> dict:
 
 
 def run_robustness(
+    universe: str,
     symbols: list[str] | None,
     refresh_data: bool,
     start_date: str | None,
@@ -87,6 +89,22 @@ def run_robustness(
     )
     if not price_dict:
         raise RuntimeError("No market data loaded.")
+
+    warmup_days = max(int(LONG_WINDOW), 252, 126) + 21 + 5
+    min_history_days = warmup_days + int(train_days) + int(test_days)
+
+    price_dict, panel_close, dropped = prepare_panel_with_history_filter(
+        price_dict,
+        price_mode=PRICE_MODE,
+        min_history_days=min_history_days,
+        keep_symbols={REGIME_SYMBOL},
+        log_fn=print,
+    )
+    if panel_close.empty:
+        raise ValueError("Price panel is empty after filtering for history.")
+
+    symbols = list(price_dict.keys())
+    print(f"Universe requested: {universe}, loaded symbols: {len(symbols)}")
 
     out_dir = RESULTS_DIR / "robustness"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,8 +164,12 @@ def run_robustness(
     # Overfit warnings
     warnings = []
     if walk_forward:
-        panel_idx = pd.DataFrame(index=equity.index)
+        panel_idx = pd.DataFrame(index=panel_close.index)
         splits = walk_forward_splits(panel_idx, train_days, test_days, step_days)
+        if not splits:
+            raise ValueError(
+                "Not enough history for train_days/test_days. Try smaller windows or earlier start date."
+            )
         grid_rows = []
         best_rows = []
         for split_id, split in enumerate(splits, start=1):

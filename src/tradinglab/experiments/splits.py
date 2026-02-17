@@ -18,7 +18,7 @@ def walk_forward_splits(
     test_days: int,
     step_days: int,
 ) -> list[dict]:
-    if panel.empty:
+    if panel.index.empty:
         return []
 
     dates = list(panel.index)

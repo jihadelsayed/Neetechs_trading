@@ -113,6 +113,14 @@ def load_symbol_csv(
     if not path.exists():
         return None
     df = pd.read_csv(path, parse_dates=["Date"]).set_index("Date")
+    if start_date:
+        start_dt = pd.to_datetime(start_date)
+        if df.index.min() > start_dt:
+            return None
+    if end_date:
+        end_dt = pd.to_datetime(end_date)
+        if df.index.max() < (end_dt - pd.Timedelta(days=1)):
+            return None
     if start_date or end_date:
         df = df.loc[start_date:end_date]
     return df

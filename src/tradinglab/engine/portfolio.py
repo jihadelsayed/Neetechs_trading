@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Callable
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,14 @@ from tradinglab.config import (
     TARGET_VOL,
     VOL_LOOKBACK,
 )
+
+MOM_SKIP_DAYS = 21
+MOM_LONG_DAYS = 252
+MOM_MID_DAYS = 126
+DISPERSION_WINDOW = 252
+TURNOVER_BUFFER = 3
+WEIGHT_CAP = 0.10
+PORTFOLIO_VOL_LOOKBACK = 60
 
 
 @dataclass
@@ -111,13 +119,63 @@ def build_panel(price_dict: dict[str, pd.DataFrame], min_coverage: float = 0.8) 
     return panel_close
 
 
-def momentum_scores(panel_close: pd.DataFrame) -> pd.DataFrame:
-    return panel_close.pct_change(MOM_LOOKBACK)
+def blended_momentum_score(
+    panel_close: pd.DataFrame,
+    skip_days: int = MOM_SKIP_DAYS,
+    long_days: int = MOM_LONG_DAYS,
+    mid_days: int = MOM_MID_DAYS,
+    vol_lookback: int = MOM_MID_DAYS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    m12_1 = panel_close.shift(skip_days) / panel_close.shift(long_days) - 1.0
+    m6_1 = panel_close.shift(skip_days) / panel_close.shift(mid_days) - 1.0
+    m_raw = 0.5 * m12_1 + 0.5 * m6_1
+    sigma = panel_close.pct_change().rolling(vol_lookback).std(ddof=0)
+    score = m_raw / sigma
+    return score, sigma
 
 
-def trend_filter(panel_close: pd.DataFrame) -> pd.DataFrame:
-    sma = panel_close.rolling(LONG_WINDOW).mean()
-    return panel_close > sma
+def dispersion_series(score: pd.DataFrame, window: int = DISPERSION_WINDOW) -> tuple[pd.Series, pd.Series]:
+    dispersion = score.std(axis=1)
+    dispersion_med = dispersion.rolling(window).median()
+    return dispersion, dispersion_med
+
+
+def inverse_vol_weights(sigmas: pd.Series, cap: float = WEIGHT_CAP) -> dict[str, float]:
+    sigmas = sigmas.replace([np.inf, -np.inf], np.nan).dropna()
+    sigmas = sigmas[sigmas > 0]
+    if sigmas.empty:
+        return {}
+    inv = 1.0 / sigmas
+    weights = inv / inv.sum()
+    if cap is not None:
+        weights = weights.clip(upper=cap)
+    total = weights.sum()
+    if total > 0:
+        weights = weights / total
+    return weights.to_dict()
+
+
+def select_with_turnover_buffer(
+    scores: pd.Series,
+    current_holdings: list[str],
+    top_n: int,
+    buffer: int = TURNOVER_BUFFER,
+    exclude_symbols: set[str] | None = None,
+) -> list[str]:
+    exclude_symbols = exclude_symbols or set()
+    scores = scores.dropna()
+    scores = scores[~scores.index.isin(exclude_symbols)]
+    if scores.empty:
+        return []
+    ranked = scores.sort_values(ascending=False)
+    top = ranked.head(top_n).index.tolist()
+    if not current_holdings:
+        return top
+    threshold = top_n + buffer
+    ranks = pd.Series(range(1, len(ranked) + 1), index=ranked.index)
+    keep = [sym for sym in current_holdings if sym in ranks.index and ranks[sym] <= threshold]
+    merged = list(dict.fromkeys(top + keep))
+    return merged
 
 
 def market_regime_ok(panel_close: pd.DataFrame, regime_symbol: str = REGIME_SYMBOL) -> pd.Series:
@@ -344,6 +402,7 @@ def run_portfolio(
     target_vol: float | None = TARGET_VOL,
     vol_lookback: int = VOL_LOOKBACK,
     slippage_mode: str = SLIPPAGE_MODE,
+    log_fn: Callable[[str], None] | None = None,
 ) -> PortfolioRun:
     local_top_n = int(top_n) if top_n is not None else TOP_N
     local_mom = int(mom_lookback) if mom_lookback is not None else MOM_LOOKBACK
@@ -354,7 +413,7 @@ def run_portfolio(
     if panel_close.empty:
         raise ValueError("Price panel is empty. No symbols with usable data.")
 
-    tradable_symbols = [s for s in panel_close.columns if allow_regime_trade or s != regime_symbol]
+    tradable_symbols = list(panel_close.columns)
     panel_close = panel_close[tradable_symbols]
     panel_open = panel_open[tradable_symbols]
 
@@ -363,24 +422,11 @@ def run_portfolio(
     dates = list(panel_close.index)
     n_days, n_syms = close_values.shape
 
-    def momentum_scores_local(panel: pd.DataFrame) -> pd.DataFrame:
-        return panel.pct_change(local_mom)
-
-    def trend_filter_local(panel: pd.DataFrame) -> pd.DataFrame:
-        sma = panel.rolling(local_long).mean()
-        return panel > sma
-
-    def market_regime_ok_local(panel: pd.DataFrame) -> pd.Series:
-        if regime_symbol in panel.columns:
-            px = panel[regime_symbol]
-        else:
-            px = panel.mean(axis=1)
-        sma200 = px.rolling(local_long).mean()
-        return px > sma200
-
-    regime_ok = market_regime_ok_local(panel_close).to_numpy()
-    mom = momentum_scores_local(panel_close).to_numpy()
-    trend_ok = trend_filter_local(panel_close).to_numpy()
+    regime_ok = market_regime_ok(panel_close, regime_symbol=regime_symbol).to_numpy()
+    score_df, sigma_df = blended_momentum_score(panel_close)
+    dispersion, dispersion_med = dispersion_series(score_df)
+    score = score_df.to_numpy()
+    sigma = sigma_df.to_numpy()
 
     rebal_dates = panel_close.resample(local_rebalance).last().index
     rebal_mask = np.array([d in set(rebal_dates) for d in dates])
@@ -393,9 +439,9 @@ def run_portfolio(
     positions_rows: list[dict] = []
     exposure_rows: list[dict] = []
     value_rows: list[dict] = []
+    portfolio_values: list[float] = []
 
     pending_orders: dict[int, list[tuple[int, float, pd.Timestamp]]] = {}
-    eq_ret = pd.Series(close_values.mean(axis=1), index=dates).pct_change()
 
     def portfolio_value(prices: np.ndarray) -> float:
         return float(cash + np.dot(shares, prices))
@@ -410,34 +456,74 @@ def run_portfolio(
         if orders:
             pending_orders.setdefault(fill_idx, []).extend(orders)
 
+    def _recent_portfolio_vol() -> float | None:
+        if len(portfolio_values) < PORTFOLIO_VOL_LOOKBACK + 1:
+            return None
+        window = np.array(portfolio_values[-(PORTFOLIO_VOL_LOOKBACK + 1):], dtype=float)
+        rets = np.diff(window) / window[:-1]
+        if rets.size == 0:
+            return None
+        vol = np.std(rets, ddof=0) * np.sqrt(252)
+        return float(vol)
+
     def compute_targets(idx: int) -> np.ndarray:
         current_equity = portfolio_value(close_values[idx])
         current_weights = np.zeros(n_syms) if current_equity <= 0 else (shares * close_values[idx]) / current_equity
 
         if not bool(regime_ok[idx]):
+            if regime_symbol in tradable_symbols:
+                targets = np.zeros(n_syms)
+                targets[tradable_symbols.index(regime_symbol)] = 1.0
+                if log_fn is not None:
+                    log_fn(f"Regime off on {dates[idx].date()}; holding {regime_symbol}.")
+                return targets
             return np.zeros(n_syms)
 
         if not rebal_mask[idx]:
             return current_weights
 
-        scores = mom[idx].copy()
-        ok_mask = trend_ok[idx]
-        scores = np.where(ok_mask, scores, -np.inf)
-        if np.all(np.isneginf(scores)):
+        if not np.isfinite(dispersion.iloc[idx]) or not np.isfinite(dispersion_med.iloc[idx]):
+            return current_weights
+        if dispersion.iloc[idx] <= dispersion_med.iloc[idx]:
+            if log_fn is not None:
+                log_fn(f"Dispersion filter failed on {dates[idx].date()}; holding {regime_symbol}.")
+            if regime_symbol in tradable_symbols:
+                targets = np.zeros(n_syms)
+                targets[tradable_symbols.index(regime_symbol)] = 1.0
+                return targets
             return np.zeros(n_syms)
 
-        top_idx = np.argsort(scores)[-local_top_n:]
-        top_idx = [i for i in top_idx if np.isfinite(scores[i])]
-        if not top_idx:
+        score_row = pd.Series(score[idx], index=tradable_symbols)
+        sigma_row = pd.Series(sigma[idx], index=tradable_symbols)
+        exclude = set()
+        if not allow_regime_trade and regime_symbol in tradable_symbols:
+            exclude.add(regime_symbol)
+        current_syms = [tradable_symbols[i] for i in range(n_syms) if shares[i] > 0]
+        selected = select_with_turnover_buffer(score_row, current_syms, local_top_n, buffer=TURNOVER_BUFFER, exclude_symbols=exclude)
+        if not selected:
+            if log_fn is not None:
+                log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; staying in cash.")
             return np.zeros(n_syms)
+
+        weights_map = inverse_vol_weights(sigma_row[selected], cap=WEIGHT_CAP)
+        if not weights_map:
+            if log_fn is not None:
+                log_fn(f"No eligible symbols on rebalance date {dates[idx].date()}; staying in cash.")
+            return np.zeros(n_syms)
+
         targets = np.zeros(n_syms)
-        base_weight = 1.0 / len(top_idx)
-        for i in top_idx:
-            targets[i] = base_weight
+        for sym, w in weights_map.items():
+            if sym in tradable_symbols:
+                targets[tradable_symbols.index(sym)] = w
 
-        vol_scale = _vol_scale(eq_ret.iloc[: idx + 1], target_vol, vol_lookback)
-        if vol_scale < 1.0:
-            targets *= vol_scale
+        realized_vol = _recent_portfolio_vol()
+        if target_vol is not None and realized_vol is not None and realized_vol > 0:
+            scale = float(target_vol) / float(realized_vol)
+            targets *= scale
+
+        total = targets.sum()
+        if total > 1.0 and total > 0:
+            targets /= total
 
         if max_position_weight is not None:
             targets = np.minimum(targets, max_position_weight)
@@ -591,6 +677,7 @@ def run_portfolio(
                 holding_info.pop(sym_idx, None)
 
         equity_close = float(cash + np.dot(shares, close_values[idx]))
+        portfolio_values.append(equity_close)
         gross_exposure = float(np.sum(np.abs(shares * close_values[idx])))
         holdings = int(np.sum(shares > 0))
 

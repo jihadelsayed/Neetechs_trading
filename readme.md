@@ -89,7 +89,9 @@ Install dependencies using:
     -   python -m app.experiment --universe small --walk-forward
     -   python -m app.live --mode paper --universe nasdaq100 --execution next_open
     -   python -m app.live --mode paper --universe nasdaq100 --flatten
-
+    -   rg -n "walk" .
+    -   python -m app.experiment --universe nasdaq100 --walk-forward --train-days 504 --test-days 126 --step-days 126
+    -   metrics_summary.csv
 ## Quickstart (Local)
 
 ```bash
@@ -184,6 +186,27 @@ Kill switch:
 -   SLIPPAGE_MODE: bps (base 5 bps, per-turnover 0)
 -   CASH_BUFFER: 1%
 -   QQQ remains a regime filter only unless enabled
+
+## Strategy Summary
+
+The strategy implements a parsimonious momentum model:
+
+- Blended momentum:
+  - M12_1 = (Price[t-21] / Price[t-252] - 1)
+  - M6_1 = (Price[t-21] / Price[t-126] - 1)
+  - M_raw = 0.5 * M12_1 + 0.5 * M6_1
+- Vol-adjusted score:
+  - sigma_i = StdDev(daily_returns_i[t-126:t])
+  - Score_i = M_raw / sigma_i
+- Dispersion filter:
+  - Dispersion_t = StdDev(Score across symbols)
+  - Dispersion_med = RollingMedian(Dispersion[t-252:t])
+  - Only rank when Dispersion_t > Dispersion_med; otherwise hold QQQ (or cash if unavailable)
+- Selection: top TOP_N by Score_i
+- Weights: inverse-vol weights, cap at 10% per name, then renormalize
+- Turnover buffer: only exit if rank falls below N + 3
+- Vol targeting: scale weights to target annual vol (default 0.15) using a 60-day window
+- Regime filter: if QQQ < SMA200, hold QQQ
 
 ## Notes
 

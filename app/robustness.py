@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 
 def _ensure_src_on_path() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -73,16 +75,20 @@ def run(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    start_date = args.start_date or "2015-01-01"
+    end_date = args.end_date or pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+
     if args.universe == "small":
         symbols = ["AAPL", "MSFT", "NVDA", "AMZN", "QQQ"]
     else:
         symbols = None
 
     run_robustness(
+        universe=args.universe,
         symbols=symbols,
         refresh_data=bool(args.refresh_data),
-        start_date=args.start_date,
-        end_date=args.end_date,
+        start_date=start_date,
+        end_date=end_date,
         walk_forward=bool(args.walk_forward),
         train_days=args.train_days,
         test_days=args.test_days,
