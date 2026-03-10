@@ -39,6 +39,17 @@ DISPERSION_WINDOW = 252
 TURNOVER_BUFFER = 3
 WEIGHT_CAP = 0.10
 PORTFOLIO_VOL_LOOKBACK = 60
+MAX_PE_BUY = 35.0
+_PE_CACHE: dict[str, float | None] = {}
+SHARE_CLASS_ISSUER_MAP: dict[str, str] = {
+    "GOOG": "ALPHABET",
+    "GOOGL": "ALPHABET",
+    "FOX": "FOX_CORP",
+    "FOXA": "FOX_CORP",
+}
+PREFERRED_TICKER_BY_ISSUER: dict[str, str] = {
+    "ALPHABET": "GOOGL",
+}
 
 
 @dataclass
@@ -84,9 +95,12 @@ def build_price_panels(
     price_dict: dict[str, pd.DataFrame],
     price_mode: str = PRICE_MODE,
     min_coverage: float = 0.8,
+    required_history_days: int | None = None,
+    keep_symbols: set[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     opens: dict[str, pd.Series] = {}
     closes: dict[str, pd.Series] = {}
+    keep_symbols = keep_symbols or set()
 
     for sym in sorted(price_dict.keys()):
         df = price_dict[sym]
@@ -100,12 +114,52 @@ def build_price_panels(
     if panel_close.empty:
         return panel_close, panel_close
 
+    if required_history_days is not None and required_history_days > 0:
+        required = int(required_history_days)
+        if required > 0:
+            # Drop symbols that cannot possibly satisfy the requested lookback,
+            # except explicitly preserved symbols (e.g., regime benchmark).
+            drop_cols = []
+            for col in panel_close.columns:
+                if col in keep_symbols:
+                    continue
+                valid_count = int(panel_close[col].dropna().shape[0])
+                if valid_count < required:
+                    drop_cols.append(col)
+            if drop_cols:
+                panel_close = panel_close.drop(columns=drop_cols, errors="ignore")
+                for col in drop_cols:
+                    opens.pop(col, None)
+                    closes.pop(col, None)
+
+            # If overlap is still too short, iteratively remove the latest-starting
+            # symbols (except keep_symbols) until overlap is long enough.
+            while not panel_close.empty:
+                overlap = panel_close.ffill().dropna(how="any")
+                if len(overlap) >= required:
+                    panel_close = overlap
+                    break
+
+                first_valid = panel_close.apply(lambda s: s.first_valid_index())
+                removable = [c for c in panel_close.columns if c not in keep_symbols and first_valid.get(c) is not None]
+                if not removable:
+                    panel_close = overlap
+                    break
+                drop_col = max(removable, key=lambda c: first_valid[c])
+                panel_close = panel_close.drop(columns=[drop_col], errors="ignore")
+                opens.pop(drop_col, None)
+                closes.pop(drop_col, None)
+
+            if panel_close.empty:
+                return panel_close, panel_close
+
     min_non_na = max(1, int(len(panel_close.columns) * min_coverage))
     panel_close = panel_close.dropna(thresh=min_non_na)
     panel_close = panel_close.ffill()
     panel_close = panel_close.dropna(how="any")
 
     panel_open = pd.DataFrame(opens).sort_index()
+    panel_open = panel_open.reindex(columns=panel_close.columns)
     panel_open = panel_open.reindex(panel_close.index).ffill()
     panel_open = panel_open.dropna(how="any")
 
@@ -125,10 +179,15 @@ def blended_momentum_score(
     long_days: int = MOM_LONG_DAYS,
     mid_days: int = MOM_MID_DAYS,
     vol_lookback: int = MOM_MID_DAYS,
+    momentum_lookback_days: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    m12_1 = panel_close.shift(skip_days) / panel_close.shift(long_days) - 1.0
-    m6_1 = panel_close.shift(skip_days) / panel_close.shift(mid_days) - 1.0
-    m_raw = 0.5 * m12_1 + 0.5 * m6_1
+    if momentum_lookback_days is None:
+        m12_1 = panel_close.shift(skip_days) / panel_close.shift(long_days) - 1.0
+        m6_1 = panel_close.shift(skip_days) / panel_close.shift(mid_days) - 1.0
+        m_raw = 0.5 * m12_1 + 0.5 * m6_1
+    else:
+        lookback = max(int(momentum_lookback_days), 1)
+        m_raw = panel_close.shift(skip_days) / panel_close.shift(lookback) - 1.0
     sigma = panel_close.pct_change().rolling(vol_lookback).std(ddof=0)
     score = m_raw / sigma
     return score, sigma
@@ -153,6 +212,139 @@ def inverse_vol_weights(sigmas: pd.Series, cap: float = WEIGHT_CAP) -> dict[str,
     if total > 0:
         weights = weights / total
     return weights.to_dict()
+
+
+def _coerce_pe(value: object) -> float | None:
+    try:
+        pe = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(pe) or pe <= 0:
+        return None
+    return pe
+
+
+def _fetch_symbol_pe(symbol: str) -> float | None:
+    key = str(symbol).strip().upper()
+    if not key:
+        return None
+    if key in _PE_CACHE:
+        return _PE_CACHE[key]
+
+    pe_value: float | None = None
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(key).info
+        if isinstance(info, dict):
+            pe_value = _coerce_pe(info.get("forwardPE"))
+            if pe_value is None:
+                pe_value = _coerce_pe(info.get("trailingPE"))
+    except Exception:
+        pe_value = None
+
+    _PE_CACHE[key] = pe_value
+    return pe_value
+
+
+def get_pe_map(symbols: Iterable[str]) -> dict[str, float | None]:
+    pe_map: dict[str, float | None] = {}
+    for symbol in symbols:
+        key = str(symbol).strip().upper()
+        if not key:
+            continue
+        pe_map[key] = _fetch_symbol_pe(key)
+    return pe_map
+
+
+def filter_scores_by_pe(
+    scores: pd.Series,
+    pe_map: dict[str, float | None],
+    max_pe: float = MAX_PE_BUY,
+) -> tuple[pd.Series, dict[str, float]]:
+    if scores.empty:
+        return scores, {}
+
+    keep_symbols: list[str] = []
+    excluded: dict[str, float] = {}
+    for symbol in scores.index:
+        key = str(symbol).strip().upper()
+        pe = pe_map.get(key)
+        if pe is not None and pe > max_pe:
+            excluded[str(symbol)] = pe
+            continue
+        keep_symbols.append(symbol)
+
+    return scores.loc[keep_symbols], excluded
+
+
+def _issuer_key(symbol: str) -> str:
+    key = str(symbol).strip().upper()
+    return SHARE_CLASS_ISSUER_MAP.get(key, key)
+
+
+def _avg_dollar_volume(
+    df: pd.DataFrame | None,
+    asof_date: pd.Timestamp | None = None,
+    window: int = 60,
+) -> float:
+    if df is None or df.empty:
+        return 0.0
+    px_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    if px_col not in df.columns or "Volume" not in df.columns:
+        return 0.0
+
+    local = df
+    if asof_date is not None:
+        local = local.loc[:asof_date]
+    if local.empty:
+        return 0.0
+
+    dollar_vol = (local[px_col].astype(float) * local["Volume"].astype(float)).tail(window)
+    dollar_vol = dollar_vol.replace([np.inf, -np.inf], np.nan).dropna()
+    if dollar_vol.empty:
+        return 0.0
+    return float(dollar_vol.mean())
+
+
+def dedupe_share_classes(
+    symbols: list[str],
+    price_dict: dict[str, pd.DataFrame] | None = None,
+    asof_date: pd.Timestamp | None = None,
+) -> list[str]:
+    if len(symbols) <= 1:
+        return symbols
+
+    price_dict = price_dict or {}
+    issuer_to_symbols: dict[str, list[str]] = {}
+    for symbol in symbols:
+        issuer = _issuer_key(symbol)
+        issuer_to_symbols.setdefault(issuer, []).append(symbol)
+
+    keep_by_issuer: dict[str, str] = {}
+    for issuer, issuer_symbols in issuer_to_symbols.items():
+        if len(issuer_symbols) == 1:
+            keep_by_issuer[issuer] = issuer_symbols[0]
+            continue
+
+        preferred = PREFERRED_TICKER_BY_ISSUER.get(issuer)
+        if preferred is not None and preferred in issuer_symbols:
+            keep_by_issuer[issuer] = preferred
+            continue
+
+        # Deterministic liquidity-based tie break.
+        winner = max(
+            issuer_symbols,
+            key=lambda s: (_avg_dollar_volume(price_dict.get(s), asof_date=asof_date), str(s)),
+        )
+        keep_by_issuer[issuer] = winner
+
+    deduped: list[str] = []
+    for symbol in symbols:
+        issuer = _issuer_key(symbol)
+        if keep_by_issuer.get(issuer) == symbol:
+            deduped.append(symbol)
+    return deduped
 
 
 def select_with_turnover_buffer(
@@ -405,17 +597,28 @@ def run_portfolio(
     log_fn: Callable[[str], None] | None = None,
 ) -> PortfolioRun:
     local_top_n = int(top_n) if top_n is not None else TOP_N
-    local_mom = int(mom_lookback) if mom_lookback is not None else MOM_LOOKBACK
+    custom_momentum_lookback = int(mom_lookback) if mom_lookback is not None else None
     local_rebalance = rebalance or REBALANCE
     local_long = int(long_window) if long_window is not None else LONG_WINDOW
 
-    panel_close, panel_open = build_price_panels(price_dict, price_mode=price_mode)
+    required_history_days = None
+    if custom_momentum_lookback is not None and custom_momentum_lookback > MOM_MID_DAYS:
+        # Ensure enough overlap for long lookbacks + skip-month + dispersion warmup.
+        required_history_days = int(custom_momentum_lookback) + MOM_SKIP_DAYS + DISPERSION_WINDOW
+
+    panel_close, panel_open = build_price_panels(
+        price_dict,
+        price_mode=price_mode,
+        required_history_days=required_history_days,
+        keep_symbols={regime_symbol},
+    )
     if panel_close.empty:
         raise ValueError("Price panel is empty. No symbols with usable data.")
 
     tradable_symbols = list(panel_close.columns)
     panel_close = panel_close[tradable_symbols]
     panel_open = panel_open[tradable_symbols]
+    pe_map = get_pe_map(tradable_symbols)
 
     close_values = panel_close.to_numpy()
     open_values = panel_open.to_numpy()
@@ -423,7 +626,10 @@ def run_portfolio(
     n_days, n_syms = close_values.shape
 
     regime_ok = market_regime_ok(panel_close, regime_symbol=regime_symbol).to_numpy()
-    score_df, sigma_df = blended_momentum_score(panel_close)
+    score_df, sigma_df = blended_momentum_score(
+        panel_close,
+        momentum_lookback_days=custom_momentum_lookback,
+    )
     dispersion, dispersion_med = dispersion_series(score_df)
     score = score_df.to_numpy()
     sigma = sigma_df.to_numpy()
@@ -503,6 +709,12 @@ def run_portfolio(
         sigma_mask = sigma_row.replace([np.inf, -np.inf], np.nan).notna() & (sigma_row > 0)
         eligible_mask = finite_mask & sigma_mask & (~score_row.index.isin(exclude))
         eligible_scores = score_row[eligible_mask]
+        eligible_scores, pe_excluded = filter_scores_by_pe(eligible_scores, pe_map, max_pe=MAX_PE_BUY)
+        if pe_excluded and log_fn is not None:
+            log_fn(
+                f"P/E filter removed {len(pe_excluded)} symbol(s) on {dates[idx].date()} "
+                f"(P/E > {MAX_PE_BUY})."
+            )
         if eligible_scores.empty:
             if regime_symbol in tradable_symbols:
                 targets = np.zeros(n_syms)
@@ -522,6 +734,7 @@ def run_portfolio(
             buffer=TURNOVER_BUFFER,
             exclude_symbols=set(),
         )
+        selected = dedupe_share_classes(selected, price_dict=price_dict, asof_date=dates[idx])
         if not selected:
             if regime_symbol in tradable_symbols:
                 targets = np.zeros(n_syms)
